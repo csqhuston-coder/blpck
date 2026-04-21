@@ -7,101 +7,146 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-canvas { display: block; }
+canvas { display: block; position: fixed; top: 0; left: 0; }
+.grain {
+  position: fixed; inset: 0; pointer-events: none; z-index: 2;
+  opacity: 0.08; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div class="grain"></div>
 <script>
 const c = document.getElementById('c');
 const ctx = c.getContext('2d');
-let W, H, mouse = { x: -9999, y: -9999 };
+let W, H, DPR = Math.min(window.devicePixelRatio || 1, 2);
+let mouse = { x: -9999, y: -9999, active: false, lastMove: 0 };
+let start = Date.now();
 
 function resize() {
-  W = c.width = window.innerWidth;
-  H = c.height = window.innerHeight;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  c.width = W * DPR;
+  c.height = H * DPR;
+  c.style.width = W + 'px';
+  c.style.height = H + 'px';
+  ctx.scale(DPR, DPR);
 }
 resize();
 window.addEventListener('resize', resize);
 
-document.addEventListener('mousemove', e => {
-  mouse.x = e.clientX;
-  mouse.y = e.clientY;
-});
-document.addEventListener('touchmove', e => {
-  mouse.x = e.touches[0].clientX;
-  mouse.y = e.touches[0].clientY;
-}, { passive: true });
+function track(x, y) {
+  mouse.x = x; mouse.y = y;
+  mouse.active = true;
+  mouse.lastMove = Date.now();
+}
+document.addEventListener('mousemove', e => track(e.clientX, e.clientY));
+document.addEventListener('touchmove', e => track(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
+document.addEventListener('touchstart', e => track(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
 
-const NUM = 120;
-const particles = Array.from({ length: NUM }, () => ({
-  x: Math.random() * window.innerWidth,
-  y: Math.random() * window.innerHeight,
-  vx: (Math.random() - 0.5) * 0.4,
-  vy: (Math.random() - 0.5) * 0.4,
-  r: Math.random() * 1.5 + 0.3,
-  hue: Math.random() * 360,
-  alpha: 0,
-  targetAlpha: Math.random() * 0.12 + 0.02,
-  born: Date.now() + Math.random() * 3000,
-}));
+// Black opal palette — deep blues, magenta, teal, amber glints
+// Each pool picks from a curated hue range, not random
+const PALETTE = [
+  { base: 220, range: 30 },  // deep blue
+  { base: 280, range: 25 },  // violet
+  { base: 320, range: 30 },  // magenta
+  { base: 170, range: 20 },  // teal
+  { base: 195, range: 15 },  // cyan
+  { base: 35,  range: 15 },  // amber glint
+  { base: 250, range: 20 },  // indigo
+  { base: 300, range: 20 },  // pink-violet
+];
+
+const pools = Array.from({ length: 10 }, (_, i) => {
+  const p = PALETTE[i % PALETTE.length];
+  return {
+    x: Math.random() * window.innerWidth,
+    y: Math.random() * window.innerHeight,
+    vx: (Math.random() - 0.5) * 0.08,
+    vy: (Math.random() - 0.5) * 0.08,
+    radius: Math.random() * 320 + 220,
+    baseHue: p.base,
+    hueRange: p.range,
+    hueOffset: 0,
+    phase: Math.random() * Math.PI * 2,
+    // Each pool has its own breath rhythm — organic irregularity
+    breathSpeed: 0.3 + Math.random() * 0.25,
+    breathPhase: Math.random() * Math.PI * 2,
+    breathDepth: 0.1 + Math.random() * 0.12,
+    driftPhase: Math.random() * Math.PI * 2,
+  };
+});
 
 function draw() {
   const now = Date.now();
-  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  const t = (now - start) / 1000;
+
+  // Fade in over 5 seconds — slow reveal
+  const fadeIn = Math.min(1, t / 5);
+
+  // Global breath — very slow, almost imperceptible
+  const globalBreath = 0.85 + Math.sin(t * 0.28) * 0.15;
+
+  // Persistent trail — lower alpha = longer smear, more material
+  ctx.fillStyle = 'rgba(0,0,0,0.09)';
   ctx.fillRect(0, 0, W, H);
 
-  for (let i = 0; i < NUM; i++) {
-    const p = particles[i];
+  // Release mouse influence if idle
+  if (now - mouse.lastMove > 2000) mouse.active = false;
 
-    // Fade in staggered on load
-    if (now > p.born) {
-      p.alpha += (p.targetAlpha - p.alpha) * 0.02;
-    }
-
-    // Gentle autonomous drift — always moving
-    p.vx += Math.sin(now * 0.0003 + i * 0.8) * 0.004;
-    p.vy += Math.cos(now * 0.0003 + i * 0.5) * 0.004;
-
-    const dx = mouse.x - p.x;
-    const dy = mouse.y - p.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < 180) {
-      p.vx += (dx / dist) * 0.06;
-      p.vy += (dy / dist) * 0.06;
-    }
-
-    p.vx *= 0.97;
-    p.vy *= 0.97;
+  pools.forEach((p, i) => {
+    // Two-layered sine drift — primary current + secondary jitter
+    p.vx += Math.sin(t * 0.08 + p.driftPhase) * 0.0015;
+    p.vy += Math.cos(t * 0.065 + p.driftPhase * 1.2) * 0.0015;
+    p.vx += Math.sin(t * 0.4 + i) * 0.0004;
+    p.vy += Math.cos(t * 0.35 + i) * 0.0004;
+    p.vx *= 0.992;
+    p.vy *= 0.992;
     p.x += p.vx;
     p.y += p.vy;
-    p.hue += 0.4;
 
-    if (p.x < 0) p.x = W;
-    if (p.x > W) p.x = 0;
-    if (p.y < 0) p.y = H;
-    if (p.y > H) p.y = 0;
+    // Wrap at edges
+    if (p.x < -p.radius) p.x = W + p.radius;
+    if (p.x > W + p.radius) p.x = -p.radius;
+    if (p.y < -p.radius) p.y = H + p.radius;
+    if (p.y > H + p.radius) p.y = -p.radius;
 
-    for (let j = i + 1; j < NUM; j++) {
-      const q = particles[j];
-      const ex = p.x - q.x;
-      const ey = p.y - q.y;
-      const ed = Math.sqrt(ex * ex + ey * ey);
-      if (ed < 90) {
-        ctx.beginPath();
-        ctx.moveTo(p.x, p.y);
-        ctx.lineTo(q.x, q.y);
-        ctx.strokeStyle = `hsla(${p.hue},70%,65%,${0.06 * (1 - ed / 90)})`;
-        ctx.lineWidth = 0.4;
-        ctx.stroke();
+    // Gentle pull toward touch — like held breath, not push
+    if (mouse.active) {
+      const dx = mouse.x - p.x;
+      const dy = mouse.y - p.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (dist < 400) {
+        const force = (1 - dist / 400) * 0.012;
+        p.vx += (dx / dist) * force;
+        p.vy += (dy / dist) * force;
       }
     }
 
+    // Individual breath rhythm
+    const breath = Math.sin(t * p.breathSpeed + p.breathPhase);
+    const breathRadius = p.radius * (1 + breath * p.breathDepth);
+
+    // Hue shifts within its curated range — dichroic feel
+    p.hueOffset = Math.sin(t * 0.15 + p.phase) * p.hueRange;
+    const h = p.baseHue + p.hueOffset;
+
+    const alpha = globalBreath * fadeIn * 0.14;
+
+    // Multi-stop gradient — outer glow, mid bleed, hot core
+    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, breathRadius);
+    grad.addColorStop(0,    `hsla(${h}, 85%, 62%, ${alpha * 1.2})`);
+    grad.addColorStop(0.25, `hsla(${h + 15}, 75%, 52%, ${alpha * 0.7})`);
+    grad.addColorStop(0.55, `hsla(${h + 30}, 65%, 40%, ${alpha * 0.3})`);
+    grad.addColorStop(1,    `hsla(${h + 40}, 50%, 20%, 0)`);
+
     ctx.beginPath();
-    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${p.hue},60%,70%,${p.alpha})`;
+    ctx.arc(p.x, p.y, breathRadius, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
     ctx.fill();
-  }
+  });
 
   requestAnimationFrame(draw);
 }
