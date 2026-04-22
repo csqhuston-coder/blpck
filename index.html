@@ -14,25 +14,96 @@ canvas { display: block; position: fixed; top: 0; left: 0; width: 100%; height: 
 <canvas id="c"></canvas>
 <script>
 const canvas = document.getElementById('c');
-const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+const gl = canvas.getContext('webgl', { preserveDrawingBuffer: false }) || canvas.getContext('experimental-webgl');
 if (!gl) { document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>'; } else {
 
-// ============================================================
-//  TOUCH MEMORY — the butterfly effect substrate
-//  We keep a rolling history of up to 12 touch impressions.
-//  Each one decays over time but influences the field while alive.
-//  New touches can amplify existing ones (call & response).
-// ============================================================
-const MAX_IMPRESSIONS = 12;
-const impressions = new Float32Array(MAX_IMPRESSIONS * 4); // x, y, bornAt, intensity
+// Need floating point textures for smooth accumulation
+const ext = gl.getExtension('OES_texture_float') || gl.getExtension('OES_texture_half_float');
+const halfFloat = gl.getExtension('OES_texture_half_float');
+const FLOAT_TYPE = halfFloat ? halfFloat.HALF_FLOAT_OES : gl.FLOAT;
 
-const vs = `attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
+const MAX_IMPRESSIONS = 8;
+const impressions = new Float32Array(MAX_IMPRESSIONS * 4);
 
-const fs = `
+const vs = `attribute vec2 p; varying vec2 v_uv;
+void main() { v_uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+
+// ==========================================================
+//  MEMORY SHADER — updates the persistent trace buffer
+//  Samples itself (with slight blur + decay) + adds new touches
+// ==========================================================
+const memoryFs = `
 precision highp float;
+varying vec2 v_uv;
+uniform sampler2D u_prev;
 uniform vec2 u_res;
 uniform float u_time;
 uniform vec4 u_imp[${MAX_IMPRESSIONS}];
+
+void main() {
+  vec2 uv = v_uv;
+  vec2 texel = 1.0 / u_res;
+
+  // Self-sample with 4-tap box blur — the memory gently diffuses over time
+  vec4 c = texture2D(u_prev, uv) * 0.6;
+  c += texture2D(u_prev, uv + vec2( texel.x,  0.0)) * 0.1;
+  c += texture2D(u_prev, uv + vec2(-texel.x,  0.0)) * 0.1;
+  c += texture2D(u_prev, uv + vec2( 0.0,  texel.y)) * 0.1;
+  c += texture2D(u_prev, uv + vec2( 0.0, -texel.y)) * 0.1;
+
+  // Decay — slow fade so touches persist for ~40 seconds
+  c *= 0.9955;
+
+  // Write in new touch impressions
+  vec2 p = uv;
+  p.x *= u_res.x / u_res.y;
+
+  for (int i = 0; i < ${MAX_IMPRESSIONS}; i++) {
+    vec4 imp = u_imp[i];
+    if (imp.w < 0.01) continue;
+
+    vec2 impP = imp.xy / u_res.xy;
+    impP.x *= u_res.x / u_res.y;
+
+    float age = u_time - imp.z;
+    float life = max(0.0, 1.0 - age / 2.5);
+    float dist = distance(p, impP);
+
+    // Expanding ripple ring
+    float ringRadius = age * 0.15;
+    float ring = exp(-pow((dist - ringRadius) * 9.0, 2.0)) * life * 0.08;
+
+    // Central residue at the touch point — this is what persists
+    float core = exp(-dist * 14.0) * life * 0.05;
+
+    // R channel: scalar energy (drives color/warping)
+    // G channel: x-direction flow bias
+    // B channel: y-direction flow bias
+    // A channel: overall presence
+    vec2 outward = normalize(p - impP + 0.0001);
+    c.r += (ring + core) * imp.w;
+    c.g += outward.x * ring * imp.w * 0.5;
+    c.b += outward.y * ring * imp.w * 0.5;
+    c.a += (ring * 0.5 + core) * imp.w;
+  }
+
+  // Clamp to prevent runaway accumulation
+  c = clamp(c, vec4(-1.0), vec4(2.0));
+
+  gl_FragColor = c;
+}
+`;
+
+// ==========================================================
+//  DISPLAY SHADER — renders the visible field
+//  Reads the memory buffer to bias its behavior
+// ==========================================================
+const displayFs = `
+precision highp float;
+varying vec2 v_uv;
+uniform sampler2D u_memory;
+uniform vec2 u_res;
+uniform float u_time;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -45,7 +116,7 @@ float noise(vec2 p) {
 
 float fbm(vec2 p) {
   float v = 0.0, a = 0.5;
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 5; i++) {
     v += a * noise(p);
     p = p * 2.03 + vec2(1.7, 9.2);
     a *= 0.5;
@@ -53,16 +124,12 @@ float fbm(vec2 p) {
   return v;
 }
 
-// Swing function: uneven subdivision (2/3, 1/3) instead of (1/2, 1/2)
-// This is the jazz "lilt" — notes don't fall on the grid
 float swing(float t) {
   float phase = fract(t);
-  // Triplet swing: first half takes 0.666, second half 0.333
   if (phase < 0.666) return floor(t) + phase * 0.75;
   return floor(t) + 0.5 + (phase - 0.666) * 1.5;
 }
 
-// Domain-warped fbm with its own temporal offset
 float warpedFbm(vec2 p, float t) {
   vec2 q = vec2(fbm(p + t * 0.05), fbm(p + vec2(5.2, 1.3) - t * 0.04));
   vec2 r = vec2(fbm(p + 4.0 * q + vec2(1.7, 9.2) + t * 0.03),
@@ -71,139 +138,112 @@ float warpedFbm(vec2 p, float t) {
 }
 
 void main() {
-  vec2 uv = gl_FragCoord.xy / u_res.xy;
+  vec2 uv = v_uv;
   vec2 p = uv;
   p.x *= u_res.x / u_res.y;
 
-  // ==========================================================
-  //  POLYRHYTHM — prime-number periods, never re-align
-  //  Three layers of time, each on its own meter
-  //  7s, 11s, 13s — the LCM is 1001 seconds (~16 min)
-  //  Applied to different aspects of the field
-  // ==========================================================
-  float T1 = swing(u_time / 7.0) * 7.0;   // slow — governs base structure
-  float T2 = swing(u_time / 11.0) * 11.0; // mid — governs warping
-  float T3 = swing(u_time / 13.0) * 13.0; // fast — governs color shift
-  float T5 = u_time / 5.0;                // cross-rhythm — 5 against 7
+  // Sample persistent memory — this is the butterfly substrate
+  vec4 mem = texture2D(u_memory, uv);
+  float memEnergy = mem.r;
+  vec2 memFlow = mem.gb;
+  float memPresence = mem.a;
 
-  // ==========================================================
-  //  EDGE AWARENESS — the field reflects off boundaries
-  //  Distance to nearest edge modulates intensity and warping
-  //  Corners are denser, edges are active, center is open
-  // ==========================================================
+  // Memory flow warps the sample position — past touches permanently alter shape
+  p += memFlow * 0.06;
+
+  // Polyrhythm — prime periods, never align
+  float T1 = swing(u_time / 7.0) * 7.0;
+  float T2 = swing(u_time / 11.0) * 11.0;
+  float T3 = swing(u_time / 13.0) * 13.0;
+  float T5 = u_time / 5.0;
+
+  // Edge awareness
   vec2 edgeDist = min(uv, 1.0 - uv);
   float edgeNear = 1.0 - smoothstep(0.0, 0.35, min(edgeDist.x, edgeDist.y));
   float cornerPool = (1.0 - smoothstep(0.0, 0.3, edgeDist.x)) * (1.0 - smoothstep(0.0, 0.3, edgeDist.y));
 
-  // ==========================================================
-  //  TOUCH MEMORY — butterfly effect
-  //  Every past touch ripples outward, decaying over ~4 seconds
-  //  The sum of all ripples is a living echo of interaction
-  // ==========================================================
-  vec2 displacement = vec2(0.0);
-  float touchEnergy = 0.0;
-
-  for (int i = 0; i < ${MAX_IMPRESSIONS}; i++) {
-    vec4 imp = u_imp[i];
-    if (imp.w < 0.01) continue;
-
-    vec2 impP = imp.xy / u_res.xy;
-    impP.x *= u_res.x / u_res.y;
-
-    float age = u_time - imp.z;
-    float life = max(0.0, 1.0 - age / 4.0);
-    float dist = distance(p, impP);
-
-    // Expanding ring — the ripple propagates outward over time
-    float ringRadius = age * 0.25;
-    float ring = exp(-pow((dist - ringRadius) * 6.0, 2.0)) * life;
-
-    // Local pooling — residue at the touch point
-    float pool = exp(-dist * 8.0) * life * 0.5;
-
-    // Sum of influences
-    touchEnergy += (ring + pool) * imp.w;
-
-    // Displacement vector — the field is pulled toward past touches
-    vec2 toward = normalize(p - impP + 0.0001);
-    displacement += toward * ring * 0.04 * imp.w;
-  }
-
-  // Apply accumulated displacement to sampling position
-  p += displacement;
-
-  // ==========================================================
-  //  LAYERED NOISE — three polyrhythmic layers
-  //  Each on its own time signature, never synced
-  // ==========================================================
+  // Three noise layers on independent time signatures
   float n1 = warpedFbm(p * 1.4 + vec2(T1 * 0.3, T2 * 0.2), T1 * 0.1);
   float n2 = warpedFbm(p * 2.6 - vec2(T2 * 0.4, T3 * 0.15), T2 * 0.15);
   float n3 = warpedFbm(p * 4.5 + vec2(T3 * 0.25, T1 * 0.1), T3 * 0.2);
 
-  // Mix weights breathe polyrhythmically — the layers fade in and out of dominance
+  // Polyrhythmic mix weights
   float w1 = 0.5 + 0.4 * sin(T1 * 0.9);
   float w2 = 0.5 + 0.4 * sin(T2 * 0.7 + 1.3);
   float w3 = 0.5 + 0.4 * sin(T3 * 1.1 + 2.1);
   float wSum = w1 + w2 + w3;
   float n = (n1 * w1 + n2 * w2 + n3 * w3) / wSum;
 
-  // Touch energy lifts the noise where it has been
-  n += touchEnergy * 0.5;
+  // Memory CLAMPED — no saturation explosion
+  float clampedMem = min(memEnergy, 0.8);
+  n += clampedMem * 0.35;
+  n += edgeNear * 0.06;
+  n += cornerPool * 0.12;
 
-  // Edge awareness — field is more active near edges
-  n += edgeNear * 0.08;
-  n += cornerPool * 0.15;
-
-  // ==========================================================
-  //  FULL DICHROIC PALETTE — all colors present, rotating
-  //  Tension/release: saturation breathes on its own rhythm
-  // ==========================================================
+  // =========================================
+  //  BLACK UNDERBODY — ensure real darkness
+  //  Start from black, add color ONLY where noise breaks through
+  //  This prevents the wash-out problem
+  // =========================================
   vec3 col = vec3(0.0);
 
-  // Phase-shifted color cycling — each color has its own clock
+  // Color clocks — each color on its own phase
   float cyc1 = sin(T1 * 0.5) * 0.5 + 0.5;
   float cyc2 = sin(T2 * 0.6 + 1.0) * 0.5 + 0.5;
   float cyc3 = sin(T3 * 0.7 + 2.0) * 0.5 + 0.5;
   float cyc5 = sin(T5 * 0.4 + 3.0) * 0.5 + 0.5;
 
-  // Indigo (deep blue-violet) — always present, strongest at low n
-  col += vec3(0.12, 0.08, 0.35) * smoothstep(0.25, 0.7, n) * (0.7 + cyc1 * 0.5);
+  // Shifted hue territories — each color gets its own threshold zone
+  // so they don't all dominate at the same luminosity
 
-  // Magenta — mid range, pulses on T2
-  col += vec3(0.55, 0.1, 0.42) * smoothstep(0.45, 0.82, n) * (0.5 + cyc2 * 0.8);
+  // Indigo — appears first, at lower n values (deep base)
+  col += vec3(0.10, 0.06, 0.32) * smoothstep(0.30, 0.55, n) * (1.0 - smoothstep(0.6, 0.8, n)) * (0.7 + cyc1 * 0.4);
 
-  // Teal — rises where n2 is dominant
-  col += vec3(0.05, 0.6, 0.55) * smoothstep(0.55, 0.85, n2) * (0.4 + cyc3 * 0.9);
+  // Teal — medium threshold, tied to n2 so it surfaces when that layer is dominant
+  col += vec3(0.04, 0.55, 0.55) * smoothstep(0.48, 0.72, n2) * (0.5 + cyc3 * 0.9);
 
-  // Cyan — rim light, appears in darker regions
-  col += vec3(0.15, 0.4, 0.7) * smoothstep(0.2, 0.45, n) * (0.3 + cyc5 * 0.6);
+  // Magenta — higher threshold, pulses on T2, reduced to share space
+  col += vec3(0.50, 0.09, 0.38) * smoothstep(0.58, 0.82, n) * (0.4 + cyc2 * 0.7);
 
-  // Amber — rare fire flash, more common now (dichroic opal)
-  col += vec3(0.95, 0.5, 0.15) * smoothstep(0.72, 0.95, n3) * (0.3 + cyc1 * 0.7);
+  // Cyan — rim light in darker regions
+  col += vec3(0.10, 0.35, 0.65) * smoothstep(0.18, 0.38, n) * (1.0 - smoothstep(0.5, 0.65, n)) * (0.4 + cyc5 * 0.5);
 
-  // Emerald — rare green glint
-  col += vec3(0.1, 0.7, 0.35) * smoothstep(0.78, 0.97, n1) * (0.2 + cyc2 * 0.5);
+  // Amber fire — high n3 threshold, appears in rare breaks
+  col += vec3(0.95, 0.48, 0.12) * smoothstep(0.75, 0.92, n3) * (0.4 + cyc1 * 0.6);
 
-  // Violet hot spike — from touch energy
-  col += vec3(0.7, 0.35, 0.95) * touchEnergy * 1.2;
+  // Emerald — very rare glint at extreme highs of n1
+  col += vec3(0.08, 0.68, 0.30) * smoothstep(0.82, 0.95, n1) * (0.3 + cyc2 * 0.5);
 
-  // Tension/release: global saturation breathes on cross-rhythm
-  float tension = 0.85 + sin(T5 * 0.3) * 0.15;
+  // Memory tint — regions you've touched have subtle lingering color bias
+  // Based on when you touched (memPresence age proxy)
+  col += vec3(0.55, 0.25, 0.85) * clampedMem * 0.4;
+
+  // Tension/release
+  float tension = 0.82 + sin(T5 * 0.3) * 0.18;
   col *= tension;
 
-  // Deep vignette — rooted in blackness
+  // Vignette
   float vig = smoothstep(1.3, 0.3, distance(uv, vec2(0.5)));
   col *= vig * 0.95 + 0.05;
 
-  // Film grain — baked into the material
-  float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.035;
+  // Grain
+  float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.03;
   col += grain;
 
-  // Slow fade in
+  // =========================================
+  //  HARD CEILING — no wash-out
+  //  Luminance-based soft clip keeps highlights in range
+  // =========================================
+  float lum = dot(col, vec3(0.299, 0.587, 0.114));
+  if (lum > 0.85) {
+    col *= 0.85 / lum;
+  }
+
+  // Fade in
   col *= smoothstep(0.0, 5.0, u_time);
 
-  // Crush darks — keep it rooted
-  col = pow(col, vec3(1.12));
+  // Crush darks — keep rooted in blackness
+  col = pow(col, vec3(1.18));
 
   gl_FragColor = vec4(col, 1.0);
 }
@@ -213,76 +253,126 @@ function compile(type, src) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src);
   gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error('Shader:', gl.getShaderInfoLog(s));
   return s;
 }
 
-const prog = gl.createProgram();
-gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
-gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
-gl.linkProgram(prog);
-gl.useProgram(prog);
+function makeProgram(vsSrc, fsSrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error('Link:', gl.getProgramInfoLog(p));
+  return p;
+}
 
+const memProg = makeProgram(vs, memoryFs);
+const dispProg = makeProgram(vs, displayFs);
+
+// Quad
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-const pLoc = gl.getAttribLocation(prog, 'p');
-gl.enableVertexAttribArray(pLoc);
-gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
 
-const uRes = gl.getUniformLocation(prog, 'u_res');
-const uTime = gl.getUniformLocation(prog, 'u_time');
-const uImpressions = [];
-for (let i = 0; i < MAX_IMPRESSIONS; i++) {
-  uImpressions.push(gl.getUniformLocation(prog, `u_imp[${i}]`));
+function bindQuad(prog) {
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 }
 
-let DPR = Math.min(window.devicePixelRatio || 1, 2);
+// Uniforms
+const memU = {
+  prev: gl.getUniformLocation(memProg, 'u_prev'),
+  res: gl.getUniformLocation(memProg, 'u_res'),
+  time: gl.getUniformLocation(memProg, 'u_time'),
+  imp: []
+};
+for (let i = 0; i < MAX_IMPRESSIONS; i++) memU.imp.push(gl.getUniformLocation(memProg, `u_imp[${i}]`));
+
+const dispU = {
+  memory: gl.getUniformLocation(dispProg, 'u_memory'),
+  res: gl.getUniformLocation(dispProg, 'u_res'),
+  time: gl.getUniformLocation(dispProg, 'u_time'),
+};
+
+// =============================================================
+//  PING-PONG FRAMEBUFFERS — alternating read/write textures
+// =============================================================
+let DPR = Math.min(window.devicePixelRatio || 1, 1.5); // memory buffer at lower DPR for perf
+
+const MEM_SCALE = 0.5; // memory texture at half resolution — still smooth, way faster
+
+function makeFbo(w, h) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, FLOAT_TYPE, null);
+
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+  return { tex, fbo, w, h };
+}
+
+let fboA, fboB, screenW, screenH, memW, memH;
+
 function resize() {
-  canvas.width = window.innerWidth * DPR;
-  canvas.height = window.innerHeight * DPR;
-  gl.viewport(0, 0, canvas.width, canvas.height);
+  screenW = Math.floor(window.innerWidth * DPR);
+  screenH = Math.floor(window.innerHeight * DPR);
+  canvas.width = screenW;
+  canvas.height = screenH;
+  memW = Math.floor(screenW * MEM_SCALE);
+  memH = Math.floor(screenH * MEM_SCALE);
+
+  if (fboA) { gl.deleteTexture(fboA.tex); gl.deleteFramebuffer(fboA.fbo); }
+  if (fboB) { gl.deleteTexture(fboB.tex); gl.deleteFramebuffer(fboB.fbo); }
+  fboA = makeFbo(memW, memH);
+  fboB = makeFbo(memW, memH);
+
+  // Clear both to zero
+  [fboA, fboB].forEach(f => {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f.fbo);
+    gl.viewport(0, 0, f.w, f.h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  });
 }
 resize();
 window.addEventListener('resize', resize);
 
-// ============================================================
-//  IMPRESSION RECORDING
-//  New touches rotate through the buffer.
-//  If a new touch lands near an old one, it amplifies that one
-//  instead of using a new slot — this is call & response
-// ============================================================
+// =============================================================
+//  TOUCH RECORDING
+// =============================================================
 let impIdx = 0;
 const start = performance.now();
 
 function recordImpression(x, y) {
   const now = (performance.now() - start) / 1000;
-  const canvasX = x * DPR;
-  const canvasY = (window.innerHeight - y) * DPR;
+  const cx = x * DPR;
+  const cy = (window.innerHeight - y) * DPR;
 
-  // Check for nearby existing impression (call & response)
+  // Check for amplification of recent nearby touch
   let amplified = false;
   for (let i = 0; i < MAX_IMPRESSIONS; i++) {
-    const ix = impressions[i * 4];
-    const iy = impressions[i * 4 + 1];
     const iborn = impressions[i * 4 + 2];
     const iint = impressions[i * 4 + 3];
-    const age = now - iborn;
-    if (iint > 0.1 && age < 3.0) {
-      const dx = canvasX - ix;
-      const dy = canvasY - iy;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d < 120 * DPR) {
-        impressions[i * 4 + 3] = Math.min(1.8, iint + 0.4); // amplify
+    if (iint > 0.1 && now - iborn < 2.0) {
+      const dx = cx - impressions[i * 4];
+      const dy = cy - impressions[i * 4 + 1];
+      if (Math.sqrt(dx * dx + dy * dy) < 100 * DPR) {
+        impressions[i * 4 + 3] = Math.min(1.5, iint + 0.3);
         amplified = true;
         break;
       }
     }
   }
-
   if (!amplified) {
-    impressions[impIdx * 4]     = canvasX;
-    impressions[impIdx * 4 + 1] = canvasY;
+    impressions[impIdx * 4]     = cx;
+    impressions[impIdx * 4 + 1] = cy;
     impressions[impIdx * 4 + 2] = now;
     impressions[impIdx * 4 + 3] = 1.0;
     impIdx = (impIdx + 1) % MAX_IMPRESSIONS;
@@ -292,37 +382,65 @@ function recordImpression(x, y) {
 let lastTrack = 0;
 function track(x, y) {
   const now = performance.now();
-  // Throttle to avoid saturating the buffer with every mousemove event
-  if (now - lastTrack < 80) return;
+  if (now - lastTrack < 100) return;
   lastTrack = now;
   recordImpression(x, y);
 }
-
 document.addEventListener('mousemove', e => track(e.clientX, e.clientY));
 document.addEventListener('touchmove', e => track(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
 document.addEventListener('touchstart', e => track(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
 
+// =============================================================
+//  RENDER LOOP — ping-pong memory update, then display
+// =============================================================
+let readFbo = fboA, writeFbo = fboB;
+
 function render() {
   const t = (performance.now() - start) / 1000;
 
-  // Decay all impressions
+  // Decay impressions in JS buffer too
   for (let i = 0; i < MAX_IMPRESSIONS; i++) {
-    const age = t - impressions[i * 4 + 2];
-    if (age > 4.0) impressions[i * 4 + 3] = 0;
+    if (t - impressions[i * 4 + 2] > 2.5) impressions[i * 4 + 3] = 0;
   }
 
-  gl.uniform2f(uRes, canvas.width, canvas.height);
-  gl.uniform1f(uTime, t);
+  // === PASS 1: update memory buffer ===
+  gl.bindFramebuffer(gl.FRAMEBUFFER, writeFbo.fbo);
+  gl.viewport(0, 0, writeFbo.w, writeFbo.h);
+  gl.useProgram(memProg);
+  bindQuad(memProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, readFbo.tex);
+  gl.uniform1i(memU.prev, 0);
+  gl.uniform2f(memU.res, writeFbo.w, writeFbo.h);
+  gl.uniform1f(memU.time, t);
   for (let i = 0; i < MAX_IMPRESSIONS; i++) {
-    gl.uniform4f(uImpressions[i],
-      impressions[i * 4],
-      impressions[i * 4 + 1],
+    // Pass impression positions in memory-buffer coords
+    gl.uniform4f(memU.imp[i],
+      impressions[i * 4] * MEM_SCALE,
+      impressions[i * 4 + 1] * MEM_SCALE,
       impressions[i * 4 + 2],
       impressions[i * 4 + 3]
     );
   }
-
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // Swap
+  [readFbo, writeFbo] = [writeFbo, readFbo];
+
+  // === PASS 2: render display using updated memory ===
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, screenW, screenH);
+  gl.useProgram(dispProg);
+  bindQuad(dispProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, readFbo.tex);
+  gl.uniform1i(dispU.memory, 0);
+  gl.uniform2f(dispU.res, screenW, screenH);
+  gl.uniform1f(dispU.time, t);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
   requestAnimationFrame(render);
 }
 render();
