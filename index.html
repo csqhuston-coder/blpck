@@ -6,83 +6,460 @@
 <title>BLPCK</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-#err {
+html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+#stage {
   position: fixed;
   inset: 0;
-  padding: 20px;
-  color: #f44;
-  font-family: monospace;
-  font-size: 11px;
-  white-space: pre-wrap;
-  overflow: auto;
-  z-index: 100;
-  background: #000;
-  display: none;
+  overflow: hidden;
+  touch-action: none;
 }
+#base, #overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+#base {
+  z-index: 1;
+}
+#overlay {
+  z-index: 2;
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+/* Effect layer — CSS filters applied dynamically via data attribute */
+#stage[data-invert="1"] #base { filter: invert(1) hue-rotate(180deg); }
+#stage[data-strobe="1"] #base { filter: contrast(2.5) saturate(3); }
+#stage[data-strobe="1"][data-invert="1"] #base { filter: invert(1) contrast(2.5) saturate(3); }
 </style>
 </head>
 <body>
-<div id="err"></div>
+<div id="stage">
+  <canvas id="base"></canvas>
+  <canvas id="overlay"></canvas>
+</div>
 <script>
-function showErr(msg) {
-  const el = document.getElementById('err');
-  el.style.display = 'block';
-  el.innerText = msg;
-}
+// =============================================================
+//  BASE WEBGL LAYER — living field (simplified shader)
+// =============================================================
+const baseCanvas = document.getElementById('base');
+const overlayCanvas = document.getElementById('overlay');
+const stage = document.getElementById('stage');
+const gl = baseCanvas.getContext('webgl') || baseCanvas.getContext('experimental-webgl');
+const ctx2d = overlayCanvas.getContext('2d');
 
-try {
-  const canvas = document.createElement('canvas');
-  canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;';
-  document.body.appendChild(canvas);
-  const gl = canvas.getContext('webgl');
-  if (!gl) { showErr('WebGL not available'); throw new Error('nogl'); }
+if (!gl) { document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>'; } else {
 
-  // Check uniform limits
-  const maxFragUniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
-  const maxVertUniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
+const MAX_IMPRESSIONS = 16;
+const IMP_LIFE = 30.0;
+const impressions = new Float32Array(MAX_IMPRESSIONS * 4);
 
-  const vs = `attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
-  const fs = `precision highp float;
-uniform float u_pkt[96];
-uniform vec4 u_imp[16];
+const vs = `attribute vec2 p; varying vec2 v_uv;
+void main() { v_uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+
+const fs = `
+precision highp float;
+varying vec2 v_uv;
 uniform vec2 u_res;
 uniform float u_time;
+uniform vec4 u_imp[${MAX_IMPRESSIONS}];
+uniform float u_chromaticAberration;
+uniform float u_mirrorMix;
+uniform float u_warpAmt;
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+float noise(vec2 p) {
+  vec2 i = floor(p); vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1,0)), f.x),
+             mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
+}
+
+float fbm(vec2 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 5; i++) {
+    v += a * noise(p);
+    p = p * 2.03 + vec2(1.7, 9.2);
+    a *= 0.5;
+  }
+  return v;
+}
+
+float swing(float t) {
+  float phase = fract(t);
+  if (phase < 0.666) return floor(t) + phase * 0.75;
+  return floor(t) + 0.5 + (phase - 0.666) * 1.5;
+}
+
+float warpedFbm(vec2 p, float t) {
+  vec2 q = vec2(fbm(p + t * 0.05), fbm(p + vec2(5.2, 1.3) - t * 0.04));
+  vec2 r = vec2(fbm(p + 4.0 * q + vec2(1.7, 9.2) + t * 0.03),
+                fbm(p + 4.0 * q + vec2(8.3, 2.8) - t * 0.02));
+  return fbm(p + 4.0 * r);
+}
+
+vec3 sampleField(vec2 uv) {
+  vec2 p = uv;
+  p.x *= u_res.x / u_res.y;
+
+  float T1 = swing(u_time / 9.0) * 9.0;
+  float T2 = swing(u_time / 14.0) * 14.0;
+  float T3 = swing(u_time / 17.0) * 17.0;
+  float T5 = u_time / 6.5;
+
+  // Touch energy & flow
+  float energy = 0.0;
+  vec2 flow = vec2(0.0);
+  float heatRecent = 0.0;
+  for (int i = 0; i < ${MAX_IMPRESSIONS}; i++) {
+    vec4 imp = u_imp[i];
+    if (imp.w < 0.001) continue;
+    vec2 impP = imp.xy / u_res.xy;
+    impP.x *= u_res.x / u_res.y;
+    float age = u_time - imp.z;
+    float life = max(0.0, 1.0 - age / ${IMP_LIFE.toFixed(1)});
+    life = life * life * (3.0 - 2.0 * life);
+    float dist = distance(p, impP);
+    vec2 outward = normalize(p - impP + 0.0001);
+    float core = exp(-dist * 10.0) * life;
+    energy += core * 0.7 * imp.w;
+    flow += outward * core * 0.15 * imp.w;
+    if (age < 1.5) heatRecent += core * imp.w * (1.0 - age / 1.5);
+  }
+  p += flow * 0.12;
+
+  // Warp displacement from chaos packets
+  p += vec2(sin(u_time * 2.0 + uv.y * 10.0), cos(u_time * 1.7 + uv.x * 10.0)) * u_warpAmt;
+
+  vec2 edgeDist = min(uv, 1.0 - uv);
+  float edgeNear = 1.0 - smoothstep(0.0, 0.35, min(edgeDist.x, edgeDist.y));
+  float cornerPool = (1.0 - smoothstep(0.0, 0.3, edgeDist.x)) * (1.0 - smoothstep(0.0, 0.3, edgeDist.y));
+
+  float n1 = warpedFbm(p * 1.4 + vec2(T1 * 0.2, T2 * 0.13), T1 * 0.07);
+  float n2 = warpedFbm(p * 2.6 - vec2(T2 * 0.25, T3 * 0.1), T2 * 0.1);
+  float n3 = warpedFbm(p * 4.5 + vec2(T3 * 0.18, T1 * 0.07), T3 * 0.13);
+
+  float w1 = 0.5 + 0.4 * sin(T1 * 0.6);
+  float w2 = 0.5 + 0.4 * sin(T2 * 0.45 + 1.3);
+  float w3 = 0.5 + 0.4 * sin(T3 * 0.75 + 2.1);
+  float n = (n1 * w1 + n2 * w2 + n3 * w3) / (w1 + w2 + w3);
+  n += edgeNear * 0.06 + cornerPool * 0.12;
+
+  vec3 col = vec3(0.0);
+  float cyc1 = sin(T1 * 0.35) * 0.5 + 0.5;
+  float cyc2 = sin(T2 * 0.4 + 1.0) * 0.5 + 0.5;
+  float cyc3 = sin(T3 * 0.5 + 2.0) * 0.5 + 0.5;
+  float cyc5 = sin(T5 * 0.3 + 3.0) * 0.5 + 0.5;
+
+  col += vec3(0.10, 0.35, 0.65) * smoothstep(0.18, 0.38, n) * (1.0 - smoothstep(0.48, 0.62, n)) * (0.4 + cyc5 * 0.5);
+  col += vec3(0.10, 0.06, 0.32) * smoothstep(0.30, 0.55, n) * (1.0 - smoothstep(0.62, 0.78, n)) * (0.7 + cyc1 * 0.4);
+  col += vec3(0.04, 0.55, 0.55) * smoothstep(0.48, 0.72, n2) * (0.5 + cyc3 * 0.9);
+  col += vec3(0.50, 0.09, 0.38) * smoothstep(0.58, 0.82, n) * (0.4 + cyc2 * 0.7);
+  col += vec3(0.95, 0.48, 0.12) * smoothstep(0.75, 0.92, n3) * (0.4 + cyc1 * 0.6);
+  col += vec3(0.08, 0.68, 0.30) * smoothstep(0.82, 0.95, n1) * (0.3 + cyc2 * 0.5);
+
+  col += vec3(0.45, 0.2, 0.7) * min(energy, 1.0) * 0.6;
+  col += vec3(0.85, 0.6, 1.0) * min(heatRecent, 1.0) * 0.9;
+
+  float tension = 0.82 + sin(T5 * 0.25) * 0.18;
+  col *= tension;
+  return col;
+}
+
 void main() {
-  float sum = u_pkt[0] + u_imp[0].x + u_res.x + u_time;
-  gl_FragColor = vec4(0.5, 0.0, 0.5, 1.0);
-}`;
+  vec2 uv = v_uv;
 
-  function compile(type, src) {
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src);
-    gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-      const info = gl.getShaderInfoLog(s);
-      throw new Error('Shader compile:\n' + info);
+  // Mirror — blend with flipped sample
+  vec3 col = sampleField(uv);
+  if (u_mirrorMix > 0.01) {
+    vec3 mirrored = sampleField(vec2(1.0 - uv.x, uv.y));
+    col = mix(col, mirrored, u_mirrorMix);
+  }
+
+  // Chromatic aberration — displace R and B channels
+  if (u_chromaticAberration > 0.001) {
+    vec2 offR = vec2(u_chromaticAberration, 0.0);
+    vec2 offB = vec2(-u_chromaticAberration, 0.0);
+    vec3 cR = sampleField(uv + offR);
+    vec3 cB = sampleField(uv + offB);
+    col = vec3(cR.r, col.g, cB.b);
+  }
+
+  float vig = smoothstep(1.3, 0.3, distance(uv, vec2(0.5)));
+  col *= vig * 0.95 + 0.05;
+
+  float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.03;
+  col += grain;
+
+  float lum = dot(col, vec3(0.299, 0.587, 0.114));
+  if (lum > 0.88) col *= 0.88 / lum;
+
+  col *= smoothstep(0.0, 1.2, u_time);
+  col = pow(col, vec3(1.15));
+
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const pLoc = gl.getAttribLocation(prog, 'p');
+gl.enableVertexAttribArray(pLoc);
+gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
+
+const uRes = gl.getUniformLocation(prog, 'u_res');
+const uTime = gl.getUniformLocation(prog, 'u_time');
+const uChroma = gl.getUniformLocation(prog, 'u_chromaticAberration');
+const uMirror = gl.getUniformLocation(prog, 'u_mirrorMix');
+const uWarp = gl.getUniformLocation(prog, 'u_warpAmt');
+const uImp = [];
+for (let i = 0; i < MAX_IMPRESSIONS; i++) uImp.push(gl.getUniformLocation(prog, `u_imp[${i}]`));
+
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+let W, H;
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  baseCanvas.width = W * DPR;
+  baseCanvas.height = H * DPR;
+  overlayCanvas.width = W;
+  overlayCanvas.height = H;
+  gl.viewport(0, 0, baseCanvas.width, baseCanvas.height);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// =============================================================
+//  CHAOS ENGINE — JS side
+//  Manages active "chaos events" each with a type and lifetime
+//  Effects applied via: shader uniforms, CSS filters, 2D overlay
+// =============================================================
+const chaosEvents = [];
+let impIdx = 0;
+const start = performance.now();
+let lastTouch = { x: 0, y: 0, time: 0, hasLast: false };
+
+function recordImpression(x, y) {
+  const now = (performance.now() - start) / 1000;
+  impressions[impIdx * 4]     = x * DPR;
+  impressions[impIdx * 4 + 1] = (H - y) * DPR;
+  impressions[impIdx * 4 + 2] = now;
+  impressions[impIdx * 4 + 3] = 1.0;
+  impIdx = (impIdx + 1) % MAX_IMPRESSIONS;
+}
+
+// Effect types
+const EFFECTS = ['chroma', 'mirror', 'warp', 'strobe', 'invert', 'tessellate', 'datamosh', 'scanline', 'colorburst'];
+
+function fireChaos(x, y, velocity) {
+  const now = (performance.now() - start) / 1000;
+  const count = 1 + Math.floor(Math.pow(Math.random(), 1.8) * 4);
+
+  for (let k = 0; k < count; k++) {
+    const type = EFFECTS[Math.floor(Math.random() * EFFECTS.length)];
+    const intensity = 0.3 + Math.random() * 0.7 + Math.min(velocity, 2) * 0.3;
+
+    let duration;
+    switch (type) {
+      case 'strobe': duration = 0.15 + Math.random() * 0.6; break;
+      case 'invert': duration = 0.04 + Math.random() * 0.18; break;
+      case 'tessellate': duration = 0.3 + Math.random() * 1.2; break;
+      case 'datamosh': duration = 0.2 + Math.random() * 0.5; break;
+      case 'scanline': duration = 0.15 + Math.random() * 0.5; break;
+      case 'colorburst': duration = 0.2 + Math.random() * 0.6; break;
+      case 'chroma': duration = 0.3 + Math.random() * 0.9; break;
+      case 'mirror': duration = 0.3 + Math.random() * 1.0; break;
+      case 'warp': duration = 0.4 + Math.random() * 1.2; break;
+      default: duration = 0.5;
     }
-    return s;
+
+    chaosEvents.push({
+      type,
+      intensity,
+      x, y,
+      startTime: now,
+      duration,
+      seed: Math.random() * 1000,
+      param: Math.random(),
+      param2: Math.random()
+    });
   }
 
-  const p = gl.createProgram();
-  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
-  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-    throw new Error('Link:\n' + gl.getProgramInfoLog(p));
+  if (chaosEvents.length > 20) chaosEvents.splice(0, chaosEvents.length - 20);
+}
+
+function track(x, y) {
+  const now = performance.now();
+  let velocity = 0;
+  if (lastTouch.hasLast) {
+    const dt = (now - lastTouch.time) / 1000;
+    const dx = x - lastTouch.x;
+    const dy = y - lastTouch.y;
+    velocity = dt > 0 ? Math.sqrt(dx*dx + dy*dy) / dt / 1000 : 0;
+  }
+  lastTouch = { x, y, time: now, hasLast: true };
+  recordImpression(x, y);
+  fireChaos(x, y, velocity);
+}
+
+stage.addEventListener('mousemove', e => track(e.clientX, e.clientY));
+stage.addEventListener('mousedown', e => track(e.clientX, e.clientY));
+stage.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  track(t.clientX, t.clientY);
+}, { passive: false });
+stage.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  track(t.clientX, t.clientY);
+}, { passive: false });
+stage.addEventListener('touchend', () => { lastTouch.hasLast = false; });
+
+// =============================================================
+//  OVERLAY RENDERING — 2D canvas effects layered on top
+// =============================================================
+function drawOverlay(now) {
+  ctx2d.clearRect(0, 0, W, H);
+
+  for (const ev of chaosEvents) {
+    const age = now - ev.startTime;
+    if (age < 0 || age > ev.duration) continue;
+    const life = 1 - age / ev.duration;
+
+    if (ev.type === 'tessellate') {
+      // Hex/square mosaic revealing cells
+      const cellSize = 8 + ev.param * 30;
+      const cellsX = Math.ceil(W / cellSize);
+      const cellsY = Math.ceil(H / cellSize);
+      ctx2d.globalAlpha = life * ev.intensity * 0.6;
+      for (let i = 0; i < cellsX; i++) {
+        for (let j = 0; j < cellsY; j++) {
+          const n = Math.sin(ev.seed + i * 0.7 + j * 1.3 + now * 3);
+          if (n > 0.3) {
+            const hue = (ev.seed * 17 + i * 5 + j * 7) % 360;
+            ctx2d.fillStyle = `hsla(${hue}, 80%, 60%, ${0.4 * life})`;
+            ctx2d.fillRect(i * cellSize, j * cellSize, cellSize - 1, cellSize - 1);
+          }
+        }
+      }
+      ctx2d.globalAlpha = 1;
+    }
+
+    else if (ev.type === 'datamosh') {
+      // Horizontal block displacement — compression tearing
+      const blockH = 4 + ev.param * 20;
+      const blocks = Math.ceil(H / blockH);
+      ctx2d.globalAlpha = life * ev.intensity * 0.7;
+      for (let i = 0; i < blocks; i++) {
+        const shift = (Math.sin(ev.seed + i * 0.3 + now * 10) * 0.5 + 0.5) * W * 0.3 * life;
+        const hue = (ev.seed * 13 + i * 11) % 360;
+        ctx2d.fillStyle = `hsla(${hue}, 90%, 55%, ${0.25 * life})`;
+        ctx2d.fillRect(shift - W, i * blockH, W * 2, blockH - 1);
+      }
+      ctx2d.globalAlpha = 1;
+    }
+
+    else if (ev.type === 'scanline') {
+      // Horizontal scanline tears
+      ctx2d.globalAlpha = life * ev.intensity;
+      const scanCount = 4 + Math.floor(ev.param * 8);
+      for (let i = 0; i < scanCount; i++) {
+        const y = (ev.seed * 37 + i * 91 + now * 200) % H;
+        const lineH = 2 + Math.random() * 6;
+        ctx2d.fillStyle = `rgba(255, 255, 255, ${0.8 * life})`;
+        ctx2d.fillRect(0, y, W, lineH);
+      }
+      ctx2d.globalAlpha = 1;
+    }
+
+    else if (ev.type === 'colorburst') {
+      // Radial RGB explosion from touch point
+      const maxR = Math.max(W, H) * 1.2;
+      const r = age * maxR * 2;
+      const hue = (ev.seed * 41) % 360;
+      const grad = ctx2d.createRadialGradient(ev.x, ev.y, 0, ev.x, ev.y, r);
+      grad.addColorStop(0, `hsla(${hue}, 100%, 65%, ${0.6 * life * ev.intensity})`);
+      grad.addColorStop(0.5, `hsla(${(hue + 60) % 360}, 100%, 55%, ${0.3 * life})`);
+      grad.addColorStop(1, `hsla(${(hue + 120) % 360}, 100%, 50%, 0)`);
+      ctx2d.fillStyle = grad;
+      ctx2d.fillRect(0, 0, W, H);
+    }
+  }
+}
+
+// =============================================================
+//  RENDER LOOP
+// =============================================================
+function render() {
+  const t = (performance.now() - start) / 1000;
+
+  // Decay impressions
+  for (let i = 0; i < MAX_IMPRESSIONS; i++) {
+    if (t - impressions[i * 4 + 2] > IMP_LIFE) impressions[i * 4 + 3] = 0;
   }
 
-  showErr(
-    'WebGL OK\n' +
-    'Max frag uniforms: ' + maxFragUniforms + ' vec4 (' + (maxFragUniforms * 4) + ' floats)\n' +
-    'Max vert uniforms: ' + maxVertUniforms + ' vec4\n' +
-    'Packet array: 96 floats = ' + (96/4) + ' vec4\n' +
-    'Impression array: 16 vec4 = 64 floats\n' +
-    'Total needed: ~' + (24 + 16 + 1) + ' vec4\n\n' +
-    'Uniform test PASSED. Shader complexity may be the real issue.'
-  );
-} catch (e) {
-  showErr('ERROR:\n' + e.message);
+  // Prune expired chaos events
+  for (let i = chaosEvents.length - 1; i >= 0; i--) {
+    if (t - chaosEvents[i].startTime > chaosEvents[i].duration) chaosEvents.splice(i, 1);
+  }
+
+  // Aggregate shader-controllable effects
+  let chromaAmt = 0, mirrorAmt = 0, warpAmt = 0;
+  let strobeActive = false, invertActive = false;
+
+  for (const ev of chaosEvents) {
+    const age = t - ev.startTime;
+    const life = Math.max(0, 1 - age / ev.duration);
+    const ease = life * life;
+
+    if (ev.type === 'chroma') chromaAmt += 0.025 * ev.intensity * ease;
+    else if (ev.type === 'mirror') mirrorAmt += ev.intensity * ease * 0.7;
+    else if (ev.type === 'warp') warpAmt += 0.04 * ev.intensity * ease;
+    else if (ev.type === 'strobe') {
+      if (Math.sin(t * (20 + ev.param * 40)) > 0) strobeActive = true;
+    }
+    else if (ev.type === 'invert') invertActive = true;
+  }
+
+  stage.dataset.strobe = strobeActive ? '1' : '0';
+  stage.dataset.invert = invertActive ? '1' : '0';
+
+  gl.uniform2f(uRes, baseCanvas.width, baseCanvas.height);
+  gl.uniform1f(uTime, t);
+  gl.uniform1f(uChroma, Math.min(chromaAmt, 0.04));
+  gl.uniform1f(uMirror, Math.min(mirrorAmt, 1.0));
+  gl.uniform1f(uWarp, Math.min(warpAmt, 0.08));
+  for (let i = 0; i < MAX_IMPRESSIONS; i++) {
+    gl.uniform4f(uImp[i],
+      impressions[i * 4], impressions[i * 4 + 1],
+      impressions[i * 4 + 2], impressions[i * 4 + 3]);
+  }
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  drawOverlay(t);
+
+  requestAnimationFrame(render);
+}
+render();
+
 }
 </script>
 </body>
