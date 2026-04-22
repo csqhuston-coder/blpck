@@ -7,28 +7,12 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none; }
-#stage {
-  position: fixed;
-  inset: 0;
-  overflow: hidden;
-  touch-action: none;
-}
+#stage { position: fixed; inset: 0; overflow: hidden; touch-action: none; }
 #base, #overlay {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
 }
-#base {
-  z-index: 1;
-}
-#overlay {
-  z-index: 2;
-  mix-blend-mode: screen;
-  pointer-events: none;
-}
-/* Effect layer — CSS filters applied dynamically via data attribute */
+#base { z-index: 1; }
+#overlay { z-index: 2; mix-blend-mode: screen; pointer-events: none; }
 #stage[data-invert="1"] #base { filter: invert(1) hue-rotate(180deg); }
 #stage[data-strobe="1"] #base { filter: contrast(2.5) saturate(3); }
 #stage[data-strobe="1"][data-invert="1"] #base { filter: invert(1) contrast(2.5) saturate(3); }
@@ -41,7 +25,45 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 </div>
 <script>
 // =============================================================
-//  BASE WEBGL LAYER — living field (simplified shader)
+//  PALETTE LIBRARY — 15 distinct color philosophies
+//  Each palette has its own color vocabulary + relationship logic
+// =============================================================
+const PALETTES = {
+  opal:       { colors: ['#1a1a4e', '#4a0e8a', '#8e1b5e', '#0a5f6e', '#d4a03c', '#9c2ea8'], mood: 'deep' },
+  solarToxic: { colors: ['#f6ff00', '#ff0080', '#00ff7f', '#ff4500', '#39ff14', '#ff00ff'], mood: 'neon' },
+  bloodMoon:  { colors: ['#4a0000', '#8b0000', '#d2691e', '#ffb400', '#1a0505', '#ff4500'], mood: 'warm' },
+  medical:    { colors: ['#5a9fd4', '#ffffff', '#c41e3a', '#e8f4f8', '#0a3d62', '#ff6b6b'], mood: 'sterile' },
+  rave:       { colors: ['#8a2be2', '#00ffff', '#ff1493', '#7b68ee', '#00fa9a', '#ff00ff'], mood: 'neon' },
+  oilSlick:   { colors: ['#1a1a2e', '#3d1e6d', '#0d3a4c', '#6a0dad', '#4a3a5c', '#8b008b'], mood: 'deep' },
+  candy:      { colors: ['#ffd1dc', '#b4f8c8', '#fffacd', '#e6e6fa', '#fbc4ab', '#c9a0dc'], mood: 'soft' },
+  warning:    { colors: ['#ffdd00', '#ff8c00', '#e60000', '#000000', '#ffbb00', '#cc0000'], mood: 'warm' },
+  cyberpunk:  { colors: ['#ff00ff', '#00ffff', '#39ff14', '#ff0080', '#0080ff', '#ffff00'], mood: 'neon' },
+  plasma:     { colors: ['#8b00ff', '#ff1493', '#ff8c00', '#00ced1', '#ffd700', '#ff00bf'], mood: 'warm' },
+  mold:       { colors: ['#8b7355', '#556b2f', '#c71585', '#654321', '#9acd32', '#8b4513'], mood: 'earth' },
+  monoViolet: { colors: ['#000000', '#ffffff', '#8a2be2', '#0a0a0a', '#2a2a2a', '#c71585'], mood: 'stark' },
+  bruise:     { colors: ['#4a0e4a', '#8b0000', '#808000', '#2f004f', '#3d1e00', '#5c0d3a'], mood: 'deep' },
+  holo:       { colors: ['#c0c0c0', '#ff69b4', '#00ced1', '#e6e6fa', '#b0e0e6', '#dda0dd'], mood: 'soft' },
+  analog:     { colors: ['#c71585', '#d4a017', '#4682b4', '#8b4513', '#deb887', '#cd5c5c'], mood: 'faded' }
+};
+const PALETTE_KEYS = Object.keys(PALETTES);
+
+function hexToRgb(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return [r, g, b];
+}
+function rgbStr(rgb, a) { return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`; }
+
+function randomPalette() {
+  return PALETTES[PALETTE_KEYS[Math.floor(Math.random() * PALETTE_KEYS.length)]];
+}
+function pickColor(palette) {
+  return hexToRgb(palette.colors[Math.floor(Math.random() * palette.colors.length)]);
+}
+
+// =============================================================
+//  BASE WEBGL LAYER
 // =============================================================
 const baseCanvas = document.getElementById('base');
 const overlayCanvas = document.getElementById('overlay');
@@ -55,6 +77,10 @@ const MAX_IMPRESSIONS = 16;
 const IMP_LIFE = 30.0;
 const impressions = new Float32Array(MAX_IMPRESSIONS * 4);
 
+// Base field palette — rotates subtly every 25-40 seconds
+let baseFieldPalette = PALETTES.opal;
+let nextBasePaletteAt = 30 + Math.random() * 15;
+
 const vs = `attribute vec2 p; varying vec2 v_uv;
 void main() { v_uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
 
@@ -67,6 +93,19 @@ uniform vec4 u_imp[${MAX_IMPRESSIONS}];
 uniform float u_chromaticAberration;
 uniform float u_mirrorMix;
 uniform float u_warpAmt;
+uniform vec3 u_c0;
+uniform vec3 u_c1;
+uniform vec3 u_c2;
+uniform vec3 u_c3;
+uniform vec3 u_c4;
+uniform vec3 u_c5;
+uniform float u_paletteBlend;
+uniform vec3 u_c0b;
+uniform vec3 u_c1b;
+uniform vec3 u_c2b;
+uniform vec3 u_c3b;
+uniform vec3 u_c4b;
+uniform vec3 u_c5b;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -109,7 +148,6 @@ vec3 sampleField(vec2 uv) {
   float T3 = swing(u_time / 17.0) * 17.0;
   float T5 = u_time / 6.5;
 
-  // Touch energy & flow
   float energy = 0.0;
   vec2 flow = vec2(0.0);
   float heatRecent = 0.0;
@@ -130,7 +168,6 @@ vec3 sampleField(vec2 uv) {
   }
   p += flow * 0.12;
 
-  // Warp displacement from chaos packets
   p += vec2(sin(u_time * 2.0 + uv.y * 10.0), cos(u_time * 1.7 + uv.x * 10.0)) * u_warpAmt;
 
   vec2 edgeDist = min(uv, 1.0 - uv);
@@ -147,18 +184,30 @@ vec3 sampleField(vec2 uv) {
   float n = (n1 * w1 + n2 * w2 + n3 * w3) / (w1 + w2 + w3);
   n += edgeNear * 0.06 + cornerPool * 0.12;
 
-  vec3 col = vec3(0.0);
   float cyc1 = sin(T1 * 0.35) * 0.5 + 0.5;
   float cyc2 = sin(T2 * 0.4 + 1.0) * 0.5 + 0.5;
   float cyc3 = sin(T3 * 0.5 + 2.0) * 0.5 + 0.5;
   float cyc5 = sin(T5 * 0.3 + 3.0) * 0.5 + 0.5;
 
-  col += vec3(0.10, 0.35, 0.65) * smoothstep(0.18, 0.38, n) * (1.0 - smoothstep(0.48, 0.62, n)) * (0.4 + cyc5 * 0.5);
-  col += vec3(0.10, 0.06, 0.32) * smoothstep(0.30, 0.55, n) * (1.0 - smoothstep(0.62, 0.78, n)) * (0.7 + cyc1 * 0.4);
-  col += vec3(0.04, 0.55, 0.55) * smoothstep(0.48, 0.72, n2) * (0.5 + cyc3 * 0.9);
-  col += vec3(0.50, 0.09, 0.38) * smoothstep(0.58, 0.82, n) * (0.4 + cyc2 * 0.7);
-  col += vec3(0.95, 0.48, 0.12) * smoothstep(0.75, 0.92, n3) * (0.4 + cyc1 * 0.6);
-  col += vec3(0.08, 0.68, 0.30) * smoothstep(0.82, 0.95, n1) * (0.3 + cyc2 * 0.5);
+  // Palette A
+  vec3 colA = vec3(0.0);
+  colA += u_c0 * smoothstep(0.18, 0.38, n) * (1.0 - smoothstep(0.48, 0.62, n)) * (0.4 + cyc5 * 0.5);
+  colA += u_c1 * smoothstep(0.30, 0.55, n) * (1.0 - smoothstep(0.62, 0.78, n)) * (0.7 + cyc1 * 0.4);
+  colA += u_c2 * smoothstep(0.48, 0.72, n2) * (0.5 + cyc3 * 0.9);
+  colA += u_c3 * smoothstep(0.58, 0.82, n) * (0.4 + cyc2 * 0.7);
+  colA += u_c4 * smoothstep(0.75, 0.92, n3) * (0.4 + cyc1 * 0.6);
+  colA += u_c5 * smoothstep(0.82, 0.95, n1) * (0.3 + cyc2 * 0.5);
+
+  // Palette B (target for blending)
+  vec3 colB = vec3(0.0);
+  colB += u_c0b * smoothstep(0.18, 0.38, n) * (1.0 - smoothstep(0.48, 0.62, n)) * (0.4 + cyc5 * 0.5);
+  colB += u_c1b * smoothstep(0.30, 0.55, n) * (1.0 - smoothstep(0.62, 0.78, n)) * (0.7 + cyc1 * 0.4);
+  colB += u_c2b * smoothstep(0.48, 0.72, n2) * (0.5 + cyc3 * 0.9);
+  colB += u_c3b * smoothstep(0.58, 0.82, n) * (0.4 + cyc2 * 0.7);
+  colB += u_c4b * smoothstep(0.75, 0.92, n3) * (0.4 + cyc1 * 0.6);
+  colB += u_c5b * smoothstep(0.82, 0.95, n1) * (0.3 + cyc2 * 0.5);
+
+  vec3 col = mix(colA, colB, u_paletteBlend);
 
   col += vec3(0.45, 0.2, 0.7) * min(energy, 1.0) * 0.6;
   col += vec3(0.85, 0.6, 1.0) * min(heatRecent, 1.0) * 0.9;
@@ -170,15 +219,11 @@ vec3 sampleField(vec2 uv) {
 
 void main() {
   vec2 uv = v_uv;
-
-  // Mirror — blend with flipped sample
   vec3 col = sampleField(uv);
   if (u_mirrorMix > 0.01) {
     vec3 mirrored = sampleField(vec2(1.0 - uv.x, uv.y));
     col = mix(col, mirrored, u_mirrorMix);
   }
-
-  // Chromatic aberration — displace R and B channels
   if (u_chromaticAberration > 0.001) {
     vec2 offR = vec2(u_chromaticAberration, 0.0);
     vec2 offB = vec2(-u_chromaticAberration, 0.0);
@@ -186,19 +231,14 @@ void main() {
     vec3 cB = sampleField(uv + offB);
     col = vec3(cR.r, col.g, cB.b);
   }
-
   float vig = smoothstep(1.3, 0.3, distance(uv, vec2(0.5)));
   col *= vig * 0.95 + 0.05;
-
   float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.03;
   col += grain;
-
   float lum = dot(col, vec3(0.299, 0.587, 0.114));
   if (lum > 0.88) col *= 0.88 / lum;
-
   col *= smoothstep(0.0, 1.2, u_time);
   col = pow(col, vec3(1.15));
-
   gl_FragColor = vec4(col, 1.0);
 }
 `;
@@ -229,8 +269,27 @@ const uTime = gl.getUniformLocation(prog, 'u_time');
 const uChroma = gl.getUniformLocation(prog, 'u_chromaticAberration');
 const uMirror = gl.getUniformLocation(prog, 'u_mirrorMix');
 const uWarp = gl.getUniformLocation(prog, 'u_warpAmt');
+const uPaletteBlend = gl.getUniformLocation(prog, 'u_paletteBlend');
+const uC = [gl.getUniformLocation(prog, 'u_c0'), gl.getUniformLocation(prog, 'u_c1'),
+            gl.getUniformLocation(prog, 'u_c2'), gl.getUniformLocation(prog, 'u_c3'),
+            gl.getUniformLocation(prog, 'u_c4'), gl.getUniformLocation(prog, 'u_c5')];
+const uCb = [gl.getUniformLocation(prog, 'u_c0b'), gl.getUniformLocation(prog, 'u_c1b'),
+             gl.getUniformLocation(prog, 'u_c2b'), gl.getUniformLocation(prog, 'u_c3b'),
+             gl.getUniformLocation(prog, 'u_c4b'), gl.getUniformLocation(prog, 'u_c5b')];
 const uImp = [];
 for (let i = 0; i < MAX_IMPRESSIONS; i++) uImp.push(gl.getUniformLocation(prog, `u_imp[${i}]`));
+
+// Normalize colors 0-1
+function paletteToRgbFloat(pal) {
+  return pal.colors.map(h => {
+    const rgb = hexToRgb(h);
+    return [rgb[0]/255, rgb[1]/255, rgb[2]/255];
+  });
+}
+let currentPaletteRgb = paletteToRgbFloat(baseFieldPalette);
+let nextPaletteRgb = currentPaletteRgb;
+let paletteBlendAmt = 0;
+let paletteBlending = false;
 
 let DPR = Math.min(window.devicePixelRatio || 1, 2);
 let W, H;
@@ -247,9 +306,7 @@ resize();
 window.addEventListener('resize', resize);
 
 // =============================================================
-//  CHAOS ENGINE — JS side
-//  Manages active "chaos events" each with a type and lifetime
-//  Effects applied via: shader uniforms, CSS filters, 2D overlay
+//  CHAOS ENGINE
 // =============================================================
 const chaosEvents = [];
 let impIdx = 0;
@@ -265,7 +322,6 @@ function recordImpression(x, y) {
   impIdx = (impIdx + 1) % MAX_IMPRESSIONS;
 }
 
-// Effect types
 const EFFECTS = ['chroma', 'mirror', 'warp', 'strobe', 'invert', 'tessellate', 'datamosh', 'scanline', 'colorburst'];
 
 function fireChaos(x, y, velocity) {
@@ -275,6 +331,12 @@ function fireChaos(x, y, velocity) {
   for (let k = 0; k < count; k++) {
     const type = EFFECTS[Math.floor(Math.random() * EFFECTS.length)];
     const intensity = 0.3 + Math.random() * 0.7 + Math.min(velocity, 2) * 0.3;
+
+    // Each chaos event picks a random palette from the library
+    const palette = randomPalette();
+    // Pre-select colors for this event from its palette
+    const eventColors = [];
+    for (let i = 0; i < 6; i++) eventColors.push(pickColor(palette));
 
     let duration;
     switch (type) {
@@ -291,17 +353,13 @@ function fireChaos(x, y, velocity) {
     }
 
     chaosEvents.push({
-      type,
-      intensity,
-      x, y,
-      startTime: now,
-      duration,
+      type, intensity, x, y,
+      startTime: now, duration,
       seed: Math.random() * 1000,
-      param: Math.random(),
-      param2: Math.random()
+      param: Math.random(), param2: Math.random(),
+      palette, eventColors
     });
   }
-
   if (chaosEvents.length > 20) chaosEvents.splice(0, chaosEvents.length - 20);
 }
 
@@ -334,7 +392,7 @@ stage.addEventListener('touchmove', e => {
 stage.addEventListener('touchend', () => { lastTouch.hasLast = false; });
 
 // =============================================================
-//  OVERLAY RENDERING — 2D canvas effects layered on top
+//  OVERLAY RENDERING — all colors from event palettes
 // =============================================================
 function drawOverlay(now) {
   ctx2d.clearRect(0, 0, W, H);
@@ -345,60 +403,58 @@ function drawOverlay(now) {
     const life = 1 - age / ev.duration;
 
     if (ev.type === 'tessellate') {
-      // Hex/square mosaic revealing cells
       const cellSize = 8 + ev.param * 30;
       const cellsX = Math.ceil(W / cellSize);
       const cellsY = Math.ceil(H / cellSize);
-      ctx2d.globalAlpha = life * ev.intensity * 0.6;
       for (let i = 0; i < cellsX; i++) {
         for (let j = 0; j < cellsY; j++) {
           const n = Math.sin(ev.seed + i * 0.7 + j * 1.3 + now * 3);
           if (n > 0.3) {
-            const hue = (ev.seed * 17 + i * 5 + j * 7) % 360;
-            ctx2d.fillStyle = `hsla(${hue}, 80%, 60%, ${0.4 * life})`;
+            // Pick a random color from the event's pre-selected palette colors
+            const colorIdx = Math.floor(Math.abs(Math.sin(ev.seed * 7 + i * 13 + j * 17)) * ev.eventColors.length);
+            const rgb = ev.eventColors[colorIdx];
+            ctx2d.fillStyle = rgbStr(rgb, 0.5 * life * ev.intensity);
             ctx2d.fillRect(i * cellSize, j * cellSize, cellSize - 1, cellSize - 1);
           }
         }
       }
-      ctx2d.globalAlpha = 1;
     }
 
     else if (ev.type === 'datamosh') {
-      // Horizontal block displacement — compression tearing
       const blockH = 4 + ev.param * 20;
       const blocks = Math.ceil(H / blockH);
-      ctx2d.globalAlpha = life * ev.intensity * 0.7;
       for (let i = 0; i < blocks; i++) {
         const shift = (Math.sin(ev.seed + i * 0.3 + now * 10) * 0.5 + 0.5) * W * 0.3 * life;
-        const hue = (ev.seed * 13 + i * 11) % 360;
-        ctx2d.fillStyle = `hsla(${hue}, 90%, 55%, ${0.25 * life})`;
+        const colorIdx = Math.floor(Math.abs(Math.sin(ev.seed + i * 11)) * ev.eventColors.length);
+        const rgb = ev.eventColors[colorIdx];
+        ctx2d.fillStyle = rgbStr(rgb, 0.3 * life * ev.intensity);
         ctx2d.fillRect(shift - W, i * blockH, W * 2, blockH - 1);
       }
-      ctx2d.globalAlpha = 1;
     }
 
     else if (ev.type === 'scanline') {
-      // Horizontal scanline tears
-      ctx2d.globalAlpha = life * ev.intensity;
       const scanCount = 4 + Math.floor(ev.param * 8);
       for (let i = 0; i < scanCount; i++) {
         const y = (ev.seed * 37 + i * 91 + now * 200) % H;
         const lineH = 2 + Math.random() * 6;
-        ctx2d.fillStyle = `rgba(255, 255, 255, ${0.8 * life})`;
+        // Scanlines pull from palette too
+        const rgb = ev.eventColors[i % ev.eventColors.length];
+        ctx2d.fillStyle = rgbStr(rgb, 0.85 * life);
         ctx2d.fillRect(0, y, W, lineH);
       }
-      ctx2d.globalAlpha = 1;
     }
 
     else if (ev.type === 'colorburst') {
-      // Radial RGB explosion from touch point
       const maxR = Math.max(W, H) * 1.2;
       const r = age * maxR * 2;
-      const hue = (ev.seed * 41) % 360;
+      // Pick 3 random colors from palette for the gradient stops
+      const c1 = ev.eventColors[0];
+      const c2 = ev.eventColors[Math.floor(ev.eventColors.length / 2)];
+      const c3 = ev.eventColors[ev.eventColors.length - 1];
       const grad = ctx2d.createRadialGradient(ev.x, ev.y, 0, ev.x, ev.y, r);
-      grad.addColorStop(0, `hsla(${hue}, 100%, 65%, ${0.6 * life * ev.intensity})`);
-      grad.addColorStop(0.5, `hsla(${(hue + 60) % 360}, 100%, 55%, ${0.3 * life})`);
-      grad.addColorStop(1, `hsla(${(hue + 120) % 360}, 100%, 50%, 0)`);
+      grad.addColorStop(0, rgbStr(c1, 0.7 * life * ev.intensity));
+      grad.addColorStop(0.5, rgbStr(c2, 0.35 * life));
+      grad.addColorStop(1, rgbStr(c3, 0));
       ctx2d.fillStyle = grad;
       ctx2d.fillRect(0, 0, W, H);
     }
@@ -406,30 +462,42 @@ function drawOverlay(now) {
 }
 
 // =============================================================
-//  RENDER LOOP
+//  RENDER LOOP — base palette rotation + chaos
 // =============================================================
 function render() {
   const t = (performance.now() - start) / 1000;
 
-  // Decay impressions
+  // Base palette rotation
+  if (t > nextBasePaletteAt && !paletteBlending) {
+    paletteBlending = true;
+    const next = randomPalette();
+    nextPaletteRgb = paletteToRgbFloat(next);
+    baseFieldPalette = next;
+    paletteBlendAmt = 0;
+  }
+  if (paletteBlending) {
+    paletteBlendAmt += 0.003; // ~5 seconds to cross-fade
+    if (paletteBlendAmt >= 1) {
+      currentPaletteRgb = nextPaletteRgb;
+      paletteBlendAmt = 0;
+      paletteBlending = false;
+      nextBasePaletteAt = t + 25 + Math.random() * 15;
+    }
+  }
+
   for (let i = 0; i < MAX_IMPRESSIONS; i++) {
     if (t - impressions[i * 4 + 2] > IMP_LIFE) impressions[i * 4 + 3] = 0;
   }
-
-  // Prune expired chaos events
   for (let i = chaosEvents.length - 1; i >= 0; i--) {
     if (t - chaosEvents[i].startTime > chaosEvents[i].duration) chaosEvents.splice(i, 1);
   }
 
-  // Aggregate shader-controllable effects
   let chromaAmt = 0, mirrorAmt = 0, warpAmt = 0;
   let strobeActive = false, invertActive = false;
-
   for (const ev of chaosEvents) {
     const age = t - ev.startTime;
     const life = Math.max(0, 1 - age / ev.duration);
     const ease = life * life;
-
     if (ev.type === 'chroma') chromaAmt += 0.025 * ev.intensity * ease;
     else if (ev.type === 'mirror') mirrorAmt += ev.intensity * ease * 0.7;
     else if (ev.type === 'warp') warpAmt += 0.04 * ev.intensity * ease;
@@ -447,6 +515,11 @@ function render() {
   gl.uniform1f(uChroma, Math.min(chromaAmt, 0.04));
   gl.uniform1f(uMirror, Math.min(mirrorAmt, 1.0));
   gl.uniform1f(uWarp, Math.min(warpAmt, 0.08));
+  gl.uniform1f(uPaletteBlend, paletteBlendAmt);
+  for (let i = 0; i < 6; i++) {
+    gl.uniform3f(uC[i], currentPaletteRgb[i][0], currentPaletteRgb[i][1], currentPaletteRgb[i][2]);
+    gl.uniform3f(uCb[i], nextPaletteRgb[i][0], nextPaletteRgb[i][1], nextPaletteRgb[i][2]);
+  }
   for (let i = 0; i < MAX_IMPRESSIONS; i++) {
     gl.uniform4f(uImp[i],
       impressions[i * 4], impressions[i * 4 + 1],
@@ -455,7 +528,6 @@ function render() {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
   drawOverlay(t);
-
   requestAnimationFrame(render);
 }
 render();
