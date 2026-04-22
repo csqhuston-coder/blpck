@@ -15,43 +15,36 @@ canvas { display: block; position: fixed; top: 0; left: 0; width: 100%; height: 
 <script>
 const canvas = document.getElementById('c');
 const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+if (!gl) { document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>'; } else {
 
-if (!gl) {
-  document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>';
-} else {
+// ============================================================
+//  TOUCH MEMORY — the butterfly effect substrate
+//  We keep a rolling history of up to 12 touch impressions.
+//  Each one decays over time but influences the field while alive.
+//  New touches can amplify existing ones (call & response).
+// ============================================================
+const MAX_IMPRESSIONS = 12;
+const impressions = new Float32Array(MAX_IMPRESSIONS * 4); // x, y, bornAt, intensity
 
-const vs = `
-attribute vec2 p;
-void main() { gl_Position = vec4(p, 0.0, 1.0); }
-`;
+const vs = `attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
 
 const fs = `
 precision highp float;
 uniform vec2 u_res;
 uniform float u_time;
-uniform vec2 u_mouse;
-uniform float u_mouseActive;
+uniform vec4 u_imp[${MAX_IMPRESSIONS}];
 
-// Hash + noise functions for organic turbulence
-float hash(vec2 p) {
-  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
 float noise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
+  vec2 i = floor(p); vec2 f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
-  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  return mix(mix(hash(i), hash(i + vec2(1,0)), f.x),
+             mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
 }
 
-// Fractal brownian motion — layered noise for that oily, turbulent feel
 float fbm(vec2 p) {
-  float v = 0.0;
-  float a = 0.5;
+  float v = 0.0, a = 0.5;
   for (int i = 0; i < 6; i++) {
     v += a * noise(p);
     p = p * 2.03 + vec2(1.7, 9.2);
@@ -60,16 +53,20 @@ float fbm(vec2 p) {
   return v;
 }
 
-// Domain-warped fbm — this is where Turner's atmospheric roiling comes from
+// Swing function: uneven subdivision (2/3, 1/3) instead of (1/2, 1/2)
+// This is the jazz "lilt" — notes don't fall on the grid
+float swing(float t) {
+  float phase = fract(t);
+  // Triplet swing: first half takes 0.666, second half 0.333
+  if (phase < 0.666) return floor(t) + phase * 0.75;
+  return floor(t) + 0.5 + (phase - 0.666) * 1.5;
+}
+
+// Domain-warped fbm with its own temporal offset
 float warpedFbm(vec2 p, float t) {
-  vec2 q = vec2(
-    fbm(p + vec2(0.0, 0.0) + t * 0.05),
-    fbm(p + vec2(5.2, 1.3) - t * 0.04)
-  );
-  vec2 r = vec2(
-    fbm(p + 4.0 * q + vec2(1.7, 9.2) + t * 0.03),
-    fbm(p + 4.0 * q + vec2(8.3, 2.8) - t * 0.02)
-  );
+  vec2 q = vec2(fbm(p + t * 0.05), fbm(p + vec2(5.2, 1.3) - t * 0.04));
+  vec2 r = vec2(fbm(p + 4.0 * q + vec2(1.7, 9.2) + t * 0.03),
+                fbm(p + 4.0 * q + vec2(8.3, 2.8) - t * 0.02));
   return fbm(p + 4.0 * r);
 }
 
@@ -78,56 +75,135 @@ void main() {
   vec2 p = uv;
   p.x *= u_res.x / u_res.y;
 
-  float t = u_time * 0.08;
+  // ==========================================================
+  //  POLYRHYTHM — prime-number periods, never re-align
+  //  Three layers of time, each on its own meter
+  //  7s, 11s, 13s — the LCM is 1001 seconds (~16 min)
+  //  Applied to different aspects of the field
+  // ==========================================================
+  float T1 = swing(u_time / 7.0) * 7.0;   // slow — governs base structure
+  float T2 = swing(u_time / 11.0) * 11.0; // mid — governs warping
+  float T3 = swing(u_time / 13.0) * 13.0; // fast — governs color shift
+  float T5 = u_time / 5.0;                // cross-rhythm — 5 against 7
 
-  // Mouse displacement — presses into the surface
-  vec2 mouseUV = u_mouse / u_res.xy;
-  mouseUV.x *= u_res.x / u_res.y;
-  float mdist = distance(p, mouseUV);
-  float press = u_mouseActive * smoothstep(0.5, 0.0, mdist) * 0.4;
-  p += normalize(p - mouseUV + 0.0001) * press * 0.08;
+  // ==========================================================
+  //  EDGE AWARENESS — the field reflects off boundaries
+  //  Distance to nearest edge modulates intensity and warping
+  //  Corners are denser, edges are active, center is open
+  // ==========================================================
+  vec2 edgeDist = min(uv, 1.0 - uv);
+  float edgeNear = 1.0 - smoothstep(0.0, 0.35, min(edgeDist.x, edgeDist.y));
+  float cornerPool = (1.0 - smoothstep(0.0, 0.3, edgeDist.x)) * (1.0 - smoothstep(0.0, 0.3, edgeDist.y));
 
-  // Two layers of warped noise — one slow underbody, one faster surface
-  float n1 = warpedFbm(p * 1.4 + vec2(t * 0.3, t * 0.2), t);
-  float n2 = warpedFbm(p * 3.0 - vec2(t * 0.4, t * 0.15), t * 1.5);
-  float n = mix(n1, n2, 0.35);
+  // ==========================================================
+  //  TOUCH MEMORY — butterfly effect
+  //  Every past touch ripples outward, decaying over ~4 seconds
+  //  The sum of all ripples is a living echo of interaction
+  // ==========================================================
+  vec2 displacement = vec2(0.0);
+  float touchEnergy = 0.0;
 
-  // Mouse makes the material ripple where touched
-  n += press * 0.6;
+  for (int i = 0; i < ${MAX_IMPRESSIONS}; i++) {
+    vec4 imp = u_imp[i];
+    if (imp.w < 0.01) continue;
 
-  // Black opal palette — deep indigo, violet, magenta, teal, rare amber glints
-  // Colors emerge from the noise field like light through wet pigment
+    vec2 impP = imp.xy / u_res.xy;
+    impP.x *= u_res.x / u_res.y;
+
+    float age = u_time - imp.z;
+    float life = max(0.0, 1.0 - age / 4.0);
+    float dist = distance(p, impP);
+
+    // Expanding ring — the ripple propagates outward over time
+    float ringRadius = age * 0.25;
+    float ring = exp(-pow((dist - ringRadius) * 6.0, 2.0)) * life;
+
+    // Local pooling — residue at the touch point
+    float pool = exp(-dist * 8.0) * life * 0.5;
+
+    // Sum of influences
+    touchEnergy += (ring + pool) * imp.w;
+
+    // Displacement vector — the field is pulled toward past touches
+    vec2 toward = normalize(p - impP + 0.0001);
+    displacement += toward * ring * 0.04 * imp.w;
+  }
+
+  // Apply accumulated displacement to sampling position
+  p += displacement;
+
+  // ==========================================================
+  //  LAYERED NOISE — three polyrhythmic layers
+  //  Each on its own time signature, never synced
+  // ==========================================================
+  float n1 = warpedFbm(p * 1.4 + vec2(T1 * 0.3, T2 * 0.2), T1 * 0.1);
+  float n2 = warpedFbm(p * 2.6 - vec2(T2 * 0.4, T3 * 0.15), T2 * 0.15);
+  float n3 = warpedFbm(p * 4.5 + vec2(T3 * 0.25, T1 * 0.1), T3 * 0.2);
+
+  // Mix weights breathe polyrhythmically — the layers fade in and out of dominance
+  float w1 = 0.5 + 0.4 * sin(T1 * 0.9);
+  float w2 = 0.5 + 0.4 * sin(T2 * 0.7 + 1.3);
+  float w3 = 0.5 + 0.4 * sin(T3 * 1.1 + 2.1);
+  float wSum = w1 + w2 + w3;
+  float n = (n1 * w1 + n2 * w2 + n3 * w3) / wSum;
+
+  // Touch energy lifts the noise where it has been
+  n += touchEnergy * 0.5;
+
+  // Edge awareness — field is more active near edges
+  n += edgeNear * 0.08;
+  n += cornerPool * 0.15;
+
+  // ==========================================================
+  //  FULL DICHROIC PALETTE — all colors present, rotating
+  //  Tension/release: saturation breathes on its own rhythm
+  // ==========================================================
   vec3 col = vec3(0.0);
 
-  // Deep blue-violet base (Turner's storm color)
-  col += vec3(0.08, 0.05, 0.22) * smoothstep(0.3, 0.75, n);
+  // Phase-shifted color cycling — each color has its own clock
+  float cyc1 = sin(T1 * 0.5) * 0.5 + 0.5;
+  float cyc2 = sin(T2 * 0.6 + 1.0) * 0.5 + 0.5;
+  float cyc3 = sin(T3 * 0.7 + 2.0) * 0.5 + 0.5;
+  float cyc5 = sin(T5 * 0.4 + 3.0) * 0.5 + 0.5;
 
-  // Magenta bleed
-  col += vec3(0.45, 0.08, 0.35) * smoothstep(0.5, 0.85, n) * 0.7;
+  // Indigo (deep blue-violet) — always present, strongest at low n
+  col += vec3(0.12, 0.08, 0.35) * smoothstep(0.25, 0.7, n) * (0.7 + cyc1 * 0.5);
 
-  // Teal glint in the bright breaks
-  col += vec3(0.05, 0.55, 0.55) * smoothstep(0.68, 0.92, n1) * 0.5;
+  // Magenta — mid range, pulses on T2
+  col += vec3(0.55, 0.1, 0.42) * smoothstep(0.45, 0.82, n) * (0.5 + cyc2 * 0.8);
 
-  // Amber — rare, only in the brightest breaks (dichroic opal flash)
-  col += vec3(0.85, 0.45, 0.15) * smoothstep(0.85, 0.98, n2) * 0.35;
+  // Teal — rises where n2 is dominant
+  col += vec3(0.05, 0.6, 0.55) * smoothstep(0.55, 0.85, n2) * (0.4 + cyc3 * 0.9);
 
-  // Cyan rim in dark areas
-  col += vec3(0.1, 0.25, 0.45) * smoothstep(0.2, 0.4, n) * 0.3;
+  // Cyan — rim light, appears in darker regions
+  col += vec3(0.15, 0.4, 0.7) * smoothstep(0.2, 0.45, n) * (0.3 + cyc5 * 0.6);
 
-  // Deep vignette — keeps it rooted in blackness
+  // Amber — rare fire flash, more common now (dichroic opal)
+  col += vec3(0.95, 0.5, 0.15) * smoothstep(0.72, 0.95, n3) * (0.3 + cyc1 * 0.7);
+
+  // Emerald — rare green glint
+  col += vec3(0.1, 0.7, 0.35) * smoothstep(0.78, 0.97, n1) * (0.2 + cyc2 * 0.5);
+
+  // Violet hot spike — from touch energy
+  col += vec3(0.7, 0.35, 0.95) * touchEnergy * 1.2;
+
+  // Tension/release: global saturation breathes on cross-rhythm
+  float tension = 0.85 + sin(T5 * 0.3) * 0.15;
+  col *= tension;
+
+  // Deep vignette — rooted in blackness
   float vig = smoothstep(1.3, 0.3, distance(uv, vec2(0.5)));
   col *= vig * 0.95 + 0.05;
 
-  // Subtle film grain — actual material noise, not overlay
+  // Film grain — baked into the material
   float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.035;
   col += grain;
 
-  // Slow reveal from black on load
-  float fadeIn = smoothstep(0.0, 5.0, u_time);
-  col *= fadeIn;
+  // Slow fade in
+  col *= smoothstep(0.0, 5.0, u_time);
 
-  // Heavy crush on the darks — keeps it mostly black
-  col = pow(col, vec3(1.15));
+  // Crush darks — keep it rooted
+  col = pow(col, vec3(1.12));
 
   gl_FragColor = vec4(col, 1.0);
 }
@@ -137,9 +213,7 @@ function compile(type, src) {
   const s = gl.createShader(type);
   gl.shaderSource(s, src);
   gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error(gl.getShaderInfoLog(s));
-  }
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
   return s;
 }
 
@@ -158,8 +232,10 @@ gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
 
 const uRes = gl.getUniformLocation(prog, 'u_res');
 const uTime = gl.getUniformLocation(prog, 'u_time');
-const uMouse = gl.getUniformLocation(prog, 'u_mouse');
-const uMouseActive = gl.getUniformLocation(prog, 'u_mouseActive');
+const uImpressions = [];
+for (let i = 0; i < MAX_IMPRESSIONS; i++) {
+  uImpressions.push(gl.getUniformLocation(prog, `u_imp[${i}]`));
+}
 
 let DPR = Math.min(window.devicePixelRatio || 1, 2);
 function resize() {
@@ -170,32 +246,81 @@ function resize() {
 resize();
 window.addEventListener('resize', resize);
 
-let mouse = { x: -9999, y: -9999, active: 0, lastMove: 0 };
+// ============================================================
+//  IMPRESSION RECORDING
+//  New touches rotate through the buffer.
+//  If a new touch lands near an old one, it amplifies that one
+//  instead of using a new slot — this is call & response
+// ============================================================
+let impIdx = 0;
+const start = performance.now();
 
-function track(x, y) {
-  mouse.x = x * DPR;
-  mouse.y = (window.innerHeight - y) * DPR;
-  mouse.active = 1;
-  mouse.lastMove = performance.now();
+function recordImpression(x, y) {
+  const now = (performance.now() - start) / 1000;
+  const canvasX = x * DPR;
+  const canvasY = (window.innerHeight - y) * DPR;
+
+  // Check for nearby existing impression (call & response)
+  let amplified = false;
+  for (let i = 0; i < MAX_IMPRESSIONS; i++) {
+    const ix = impressions[i * 4];
+    const iy = impressions[i * 4 + 1];
+    const iborn = impressions[i * 4 + 2];
+    const iint = impressions[i * 4 + 3];
+    const age = now - iborn;
+    if (iint > 0.1 && age < 3.0) {
+      const dx = canvasX - ix;
+      const dy = canvasY - iy;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 120 * DPR) {
+        impressions[i * 4 + 3] = Math.min(1.8, iint + 0.4); // amplify
+        amplified = true;
+        break;
+      }
+    }
+  }
+
+  if (!amplified) {
+    impressions[impIdx * 4]     = canvasX;
+    impressions[impIdx * 4 + 1] = canvasY;
+    impressions[impIdx * 4 + 2] = now;
+    impressions[impIdx * 4 + 3] = 1.0;
+    impIdx = (impIdx + 1) % MAX_IMPRESSIONS;
+  }
 }
+
+let lastTrack = 0;
+function track(x, y) {
+  const now = performance.now();
+  // Throttle to avoid saturating the buffer with every mousemove event
+  if (now - lastTrack < 80) return;
+  lastTrack = now;
+  recordImpression(x, y);
+}
+
 document.addEventListener('mousemove', e => track(e.clientX, e.clientY));
 document.addEventListener('touchmove', e => track(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
 document.addEventListener('touchstart', e => track(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
 
-const start = performance.now();
 function render() {
-  const now = performance.now();
-  const t = (now - start) / 1000;
+  const t = (performance.now() - start) / 1000;
 
-  // Mouse influence fades out when idle
-  if (now - mouse.lastMove > 800) {
-    mouse.active = Math.max(0, mouse.active - 0.015);
+  // Decay all impressions
+  for (let i = 0; i < MAX_IMPRESSIONS; i++) {
+    const age = t - impressions[i * 4 + 2];
+    if (age > 4.0) impressions[i * 4 + 3] = 0;
   }
 
   gl.uniform2f(uRes, canvas.width, canvas.height);
   gl.uniform1f(uTime, t);
-  gl.uniform2f(uMouse, mouse.x, mouse.y);
-  gl.uniform1f(uMouseActive, mouse.active);
+  for (let i = 0; i < MAX_IMPRESSIONS; i++) {
+    gl.uniform4f(uImpressions[i],
+      impressions[i * 4],
+      impressions[i * 4 + 1],
+      impressions[i * 4 + 2],
+      impressions[i * 4 + 3]
+    );
+  }
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   requestAnimationFrame(render);
