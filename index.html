@@ -6,534 +6,83 @@
 <title>BLPCK</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none; }
-canvas { display: block; position: fixed; top: 0; left: 0; width: 100%; height: 100%; touch-action: none; }
+html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+#err {
+  position: fixed;
+  inset: 0;
+  padding: 20px;
+  color: #f44;
+  font-family: monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow: auto;
+  z-index: 100;
+  background: #000;
+  display: none;
+}
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
+<div id="err"></div>
 <script>
-const canvas = document.getElementById('c');
-const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-if (!gl) { document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>'; } else {
+function showErr(msg) {
+  const el = document.getElementById('err');
+  el.style.display = 'block';
+  el.innerText = msg;
+}
 
-const MAX_IMPRESSIONS = 16;
-const IMP_LIFE = 30.0;
-const impressions = new Float32Array(MAX_IMPRESSIONS * 4);
+try {
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;';
+  document.body.appendChild(canvas);
+  const gl = canvas.getContext('webgl');
+  if (!gl) { showErr('WebGL not available'); throw new Error('nogl'); }
 
-// ===========================================================
-//  DISTURBANCE PACKETS — each represents a chaos event
-//  Each packet: type, intensity, x, y, startTime, duration,
-//              param1, param2, param3, zoneX, zoneY, zoneR
-//  Type codes: 0=datamosh, 1=tessellate, 2=strobe, 3=mirror,
-//              4=kaleido, 5=pixelsort, 6=chromaburst, 7=invert
-// ===========================================================
-const MAX_PACKETS = 8;
-const packets = new Float32Array(MAX_PACKETS * 12);
+  // Check uniform limits
+  const maxFragUniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+  const maxVertUniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
 
-const vs = `attribute vec2 p; varying vec2 v_uv;
-void main() { v_uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
-
-const fs = `
-precision highp float;
-varying vec2 v_uv;
+  const vs = `attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
+  const fs = `precision highp float;
+uniform float u_pkt[96];
+uniform vec4 u_imp[16];
 uniform vec2 u_res;
 uniform float u_time;
-uniform vec4 u_imp[${MAX_IMPRESSIONS}];
-uniform float u_pkt[${MAX_PACKETS * 12}];
-
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float hash1(float p) { return fract(sin(p * 127.1) * 43758.5453); }
-
-float noise(vec2 p) {
-  vec2 i = floor(p); vec2 f = fract(p);
-  f = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1,0)), f.x),
-             mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
-}
-
-float fbm(vec2 p) {
-  float v = 0.0, a = 0.5;
-  for (int i = 0; i < 5; i++) {
-    v += a * noise(p);
-    p = p * 2.03 + vec2(1.7, 9.2);
-    a *= 0.5;
-  }
-  return v;
-}
-
-float swing(float t) {
-  float phase = fract(t);
-  if (phase < 0.666) return floor(t) + phase * 0.75;
-  return floor(t) + 0.5 + (phase - 0.666) * 1.5;
-}
-
-float warpedFbm(vec2 p, float t) {
-  vec2 q = vec2(fbm(p + t * 0.05), fbm(p + vec2(5.2, 1.3) - t * 0.04));
-  vec2 r = vec2(fbm(p + 4.0 * q + vec2(1.7, 9.2) + t * 0.03),
-                fbm(p + 4.0 * q + vec2(8.3, 2.8) - t * 0.02));
-  return fbm(p + 4.0 * r);
-}
-
-// Rotate a point around another
-vec2 rotate(vec2 p, vec2 c, float a) {
-  float s = sin(a), co = cos(a);
-  vec2 d = p - c;
-  return c + vec2(d.x * co - d.y * s, d.x * s + d.y * co);
-}
-
-// ============================================================
-//  BASE FIELD — the ground state that chaos erupts from
-// ============================================================
-vec3 baseField(vec2 uv, vec2 p, float time) {
-  float T1 = swing(time / 9.0) * 9.0;   // slowed from 7
-  float T2 = swing(time / 14.0) * 14.0; // slowed from 11
-  float T3 = swing(time / 17.0) * 17.0; // slowed from 13
-  float T5 = time / 6.5;
-
-  vec2 edgeDist = min(uv, 1.0 - uv);
-  float edgeNear = 1.0 - smoothstep(0.0, 0.35, min(edgeDist.x, edgeDist.y));
-  float cornerPool = (1.0 - smoothstep(0.0, 0.3, edgeDist.x)) * (1.0 - smoothstep(0.0, 0.3, edgeDist.y));
-
-  float n1 = warpedFbm(p * 1.4 + vec2(T1 * 0.2, T2 * 0.13), T1 * 0.07);
-  float n2 = warpedFbm(p * 2.6 - vec2(T2 * 0.25, T3 * 0.1), T2 * 0.1);
-  float n3 = warpedFbm(p * 4.5 + vec2(T3 * 0.18, T1 * 0.07), T3 * 0.13);
-
-  float w1 = 0.5 + 0.4 * sin(T1 * 0.6);
-  float w2 = 0.5 + 0.4 * sin(T2 * 0.45 + 1.3);
-  float w3 = 0.5 + 0.4 * sin(T3 * 0.75 + 2.1);
-  float n = (n1 * w1 + n2 * w2 + n3 * w3) / (w1 + w2 + w3);
-  n += edgeNear * 0.06 + cornerPool * 0.12;
-
-  vec3 col = vec3(0.0);
-  float cyc1 = sin(T1 * 0.35) * 0.5 + 0.5;
-  float cyc2 = sin(T2 * 0.4 + 1.0) * 0.5 + 0.5;
-  float cyc3 = sin(T3 * 0.5 + 2.0) * 0.5 + 0.5;
-  float cyc5 = sin(T5 * 0.3 + 3.0) * 0.5 + 0.5;
-
-  col += vec3(0.10, 0.35, 0.65) * smoothstep(0.18, 0.38, n) * (1.0 - smoothstep(0.48, 0.62, n)) * (0.4 + cyc5 * 0.5);
-  col += vec3(0.10, 0.06, 0.32) * smoothstep(0.30, 0.55, n) * (1.0 - smoothstep(0.62, 0.78, n)) * (0.7 + cyc1 * 0.4);
-  col += vec3(0.04, 0.55, 0.55) * smoothstep(0.48, 0.72, n2) * (0.5 + cyc3 * 0.9);
-  col += vec3(0.50, 0.09, 0.38) * smoothstep(0.58, 0.82, n) * (0.4 + cyc2 * 0.7);
-  col += vec3(0.95, 0.48, 0.12) * smoothstep(0.75, 0.92, n3) * (0.4 + cyc1 * 0.6);
-  col += vec3(0.08, 0.68, 0.30) * smoothstep(0.82, 0.95, n1) * (0.3 + cyc2 * 0.5);
-
-  float tension = 0.82 + sin(T5 * 0.25) * 0.18;
-  return col * tension;
-}
-
 void main() {
-  vec2 uv = v_uv;
-  vec2 p = uv;
-  p.x *= u_res.x / u_res.y;
+  float sum = u_pkt[0] + u_imp[0].x + u_res.x + u_time;
+  gl_FragColor = vec4(0.5, 0.0, 0.5, 1.0);
+}`;
 
-  // ========================================================
-  //  IMPRESSION ACCUMULATION — lingering touch memory
-  // ========================================================
-  float energy = 0.0;
-  vec2 flow = vec2(0.0);
-  float heatRecent = 0.0;
-
-  for (int i = 0; i < ${MAX_IMPRESSIONS}; i++) {
-    vec4 imp = u_imp[i];
-    if (imp.w < 0.001) continue;
-    vec2 impP = imp.xy / u_res.xy;
-    impP.x *= u_res.x / u_res.y;
-    float age = u_time - imp.z;
-    float life = max(0.0, 1.0 - age / ${IMP_LIFE.toFixed(1)});
-    life = life * life * (3.0 - 2.0 * life);
-    float dist = distance(p, impP);
-    vec2 outward = normalize(p - impP + 0.0001);
-    float core = exp(-dist * 10.0) * life;
-    energy += core * 0.7 * imp.w;
-    flow += outward * core * 0.15 * imp.w;
-    if (age < 1.5) heatRecent += core * imp.w * (1.0 - age / 1.5);
-  }
-
-  // ========================================================
-  //  DISTURBANCE PACKETS — scan all active chaos events
-  //  Build up transformations to apply to the field
-  // ========================================================
-  vec2 sampleUV = uv;
-  vec2 samplePos = p;
-  float strobeAmp = 0.0;
-  float chromaAmp = 0.0;
-  vec3 chromaTint = vec3(0.0);
-  float invertAmp = 0.0;
-  float tessAmp = 0.0;
-  float tessScale = 20.0;
-  float kaleidoAmp = 0.0;
-  float kaleidoAngle = 0.0;
-  vec2 kaleidoCenter = vec2(0.5);
-  float mirrorAmp = 0.0;
-  float mirrorAngle = 0.0;
-  float sortAmp = 0.0;
-  float sortDir = 0.0;
-  float burstAmp = 0.0;
-  vec3 burstColor = vec3(0.0);
-  float moshAmp = 0.0;
-
-  for (int i = 0; i < ${MAX_PACKETS}; i++) {
-    int base = i * 12;
-    float intensity = u_pkt[base + 1];
-    if (intensity < 0.001) continue;
-
-    float ptype = u_pkt[base + 0];
-    float px = u_pkt[base + 2];
-    float py = u_pkt[base + 3];
-    float startT = u_pkt[base + 4];
-    float duration = u_pkt[base + 5];
-    float param1 = u_pkt[base + 6];
-    float param2 = u_pkt[base + 7];
-    float param3 = u_pkt[base + 8];
-    float zoneR = u_pkt[base + 11];
-
-    float age = u_time - startT;
-    if (age < 0.0 || age > duration) continue;
-    float life = 1.0 - age / duration;
-    life = life * life; // ease out
-
-    vec2 zoneCenter = vec2(px / u_res.x, py / u_res.y);
-    float zoneDist = distance(uv, zoneCenter);
-    float zoneFalloff = smoothstep(zoneR, 0.0, zoneDist);
-    float weight = life * intensity * zoneFalloff;
-    if (weight < 0.001) continue;
-
-    // Type 0: DATAMOSH — block displacement + compression artifact feel
-    if (ptype < 0.5) {
-      vec2 block = floor(uv * param1) / param1;
-      float moshShift = (hash(block + startT) - 0.5) * 0.2;
-      sampleUV += vec2(moshShift, moshShift * 0.3) * weight;
-      moshAmp += weight;
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      const info = gl.getShaderInfoLog(s);
+      throw new Error('Shader compile:\n' + info);
     }
-    // Type 1: TESSELLATE — ASCII/mosaic grid reveal
-    else if (ptype < 1.5) {
-      tessAmp += weight;
-      tessScale = param1;
-    }
-    // Type 2: STROBE — multi-parameter flashing
-    else if (ptype < 2.5) {
-      float strobe = step(0.5, fract(u_time * param1));
-      strobeAmp += strobe * weight;
-    }
-    // Type 3: MIRROR — opposite zones twist against each other
-    else if (ptype < 3.5) {
-      mirrorAmp += weight;
-      mirrorAngle = param1;
-    }
-    // Type 4: KALEIDO — rotational fracture
-    else if (ptype < 4.5) {
-      kaleidoAmp += weight;
-      kaleidoAngle = param1;
-      kaleidoCenter = zoneCenter;
-    }
-    // Type 5: PIXEL SORT — scanline tear
-    else if (ptype < 5.5) {
-      sortAmp += weight;
-      sortDir = param1; // 0 = horizontal, 1 = vertical
-    }
-    // Type 6: CHROMA BURST — RGB explosion
-    else if (ptype < 6.5) {
-      chromaAmp += weight;
-      chromaTint += vec3(
-        hash1(startT + 0.1),
-        hash1(startT + 0.2),
-        hash1(startT + 0.3)
-      ) * weight;
-    }
-    // Type 7: INVERT — palette flip
-    else {
-      invertAmp += weight;
-    }
+    return s;
   }
 
-  // Apply mirror — twist across diagonal
-  if (mirrorAmp > 0.01) {
-    vec2 mirrored = rotate(uv, vec2(0.5), mirrorAngle);
-    mirrored = vec2(1.0) - mirrored;
-    sampleUV = mix(sampleUV, mirrored, clamp(mirrorAmp, 0.0, 1.0));
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error('Link:\n' + gl.getProgramInfoLog(p));
   }
 
-  // Apply kaleidoscope — rotational symmetry
-  if (kaleidoAmp > 0.01) {
-    vec2 k = uv - kaleidoCenter;
-    float a = atan(k.y, k.x);
-    float r = length(k);
-    float slices = 6.0;
-    a = mod(a, 6.28318 / slices);
-    a = abs(a - 3.14159 / slices);
-    vec2 kUV = kaleidoCenter + vec2(cos(a), sin(a)) * r;
-    sampleUV = mix(sampleUV, kUV, clamp(kaleidoAmp, 0.0, 1.0));
-  }
-
-  // Apply pixel sort — band displacement
-  if (sortAmp > 0.01) {
-    float band = sortDir > 0.5 ? sampleUV.x : sampleUV.y;
-    float shift = (hash1(floor(band * 40.0) + u_time * 8.0) - 0.5) * 0.3 * sortAmp;
-    if (sortDir > 0.5) sampleUV.y += shift;
-    else sampleUV.x += shift;
-  }
-
-  // Apply flow from touch memory
-  vec2 samplePFinal = sampleUV;
-  samplePFinal.x *= u_res.x / u_res.y;
-  samplePFinal += flow * 0.12;
-
-  // Sample the base field
-  vec3 col = baseField(sampleUV, samplePFinal, u_time);
-
-  // Chromatic aberration on datamosh — sample three times with offsets
-  if (moshAmp > 0.01) {
-    vec2 offsetR = vec2(0.008, 0.0) * moshAmp;
-    vec2 offsetB = vec2(-0.008, 0.0) * moshAmp;
-    vec2 pR = (sampleUV + offsetR); pR.x *= u_res.x / u_res.y;
-    vec2 pB = (sampleUV + offsetB); pB.x *= u_res.x / u_res.y;
-    vec3 cR = baseField(sampleUV + offsetR, pR, u_time);
-    vec3 cB = baseField(sampleUV + offsetB, pB, u_time);
-    col = vec3(cR.r, col.g, cB.b);
-  }
-
-  // Tessellation — posterize into mosaic cells
-  if (tessAmp > 0.01) {
-    vec2 cell = floor(uv * tessScale) / tessScale;
-    vec2 cellCenter = cell + 0.5 / tessScale;
-    vec2 cellP = cellCenter; cellP.x *= u_res.x / u_res.y;
-    vec3 cellCol = baseField(cellCenter, cellP, u_time);
-    // Threshold each cell to on/off like ASCII
-    float cellLum = dot(cellCol, vec3(0.299, 0.587, 0.114));
-    float cellThresh = step(0.2, cellLum);
-    cellCol *= cellThresh * 1.5;
-    col = mix(col, cellCol, clamp(tessAmp, 0.0, 1.0));
-  }
-
-  // Apply touch energy highlights
-  col += vec3(0.45, 0.2, 0.7) * min(energy, 1.0) * 0.6;
-  col += vec3(0.85, 0.6, 1.0) * min(heatRecent, 1.0) * 0.9;
-
-  // Strobe — flash the whole output
-  col = mix(col, col * 2.5, clamp(strobeAmp * 0.6, 0.0, 0.8));
-
-  // Chroma burst — inject spectrum
-  col += chromaTint * 1.2;
-
-  // Invert
-  col = mix(col, 1.0 - col, clamp(invertAmp, 0.0, 1.0));
-
-  // Vignette
-  float vig = smoothstep(1.3, 0.3, distance(uv, vec2(0.5)));
-  col *= vig * 0.95 + 0.05;
-
-  // Grain
-  float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.03;
-  col += grain;
-
-  // Luminance ceiling
-  float lum = dot(col, vec3(0.299, 0.587, 0.114));
-  if (lum > 0.88) col *= 0.88 / lum;
-
-  // Faster fade in — 1.2s instead of 5s
-  col *= smoothstep(0.0, 1.2, u_time);
-
-  col = pow(col, vec3(1.15));
-
-  gl_FragColor = vec4(col, 1.0);
-}
-`;
-
-function compile(type, src) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
-  return s;
-}
-
-const prog = gl.createProgram();
-gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
-gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
-gl.linkProgram(prog);
-gl.useProgram(prog);
-
-const buf = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
-const pLoc = gl.getAttribLocation(prog, 'p');
-gl.enableVertexAttribArray(pLoc);
-gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
-
-const uRes = gl.getUniformLocation(prog, 'u_res');
-const uTime = gl.getUniformLocation(prog, 'u_time');
-const uImp = [];
-for (let i = 0; i < MAX_IMPRESSIONS; i++) uImp.push(gl.getUniformLocation(prog, `u_imp[${i}]`));
-const uPkt = gl.getUniformLocation(prog, 'u_pkt');
-
-let DPR = Math.min(window.devicePixelRatio || 1, 2);
-function resize() {
-  canvas.width = window.innerWidth * DPR;
-  canvas.height = window.innerHeight * DPR;
-  gl.viewport(0, 0, canvas.width, canvas.height);
-}
-resize();
-window.addEventListener('resize', resize);
-
-// ============================================================
-//  CHAOS ENGINE
-//  Each touch/movement randomly selects 1-3 effect types and
-//  fires packets with randomized params.
-//  No deterministic mapping. Pure chance.
-// ============================================================
-let impIdx = 0;
-let pktIdx = 0;
-const start = performance.now();
-let lastTouch = { x: 0, y: 0, time: 0, hasLast: false };
-
-function recordImpression(x, y) {
-  const now = (performance.now() - start) / 1000;
-  const cx = x * DPR;
-  const cy = (window.innerHeight - y) * DPR;
-
-  impressions[impIdx * 4]     = cx;
-  impressions[impIdx * 4 + 1] = cy;
-  impressions[impIdx * 4 + 2] = now;
-  impressions[impIdx * 4 + 3] = 1.0;
-  impIdx = (impIdx + 1) % MAX_IMPRESSIONS;
-}
-
-function fireChaos(x, y, velocity) {
-  const now = (performance.now() - start) / 1000;
-  const cx = x * DPR;
-  const cy = (window.innerHeight - y) * DPR;
-
-  // Number of simultaneous effects — 1 to 4, weighted
-  const count = 1 + Math.floor(Math.pow(Math.random(), 2) * 4);
-
-  for (let k = 0; k < count; k++) {
-    const slot = pktIdx * 12;
-    const type = Math.floor(Math.random() * 8); // 0-7
-
-    // Randomize duration per type — some snap fast, some linger
-    let duration;
-    switch (type) {
-      case 0: duration = 0.15 + Math.random() * 0.4; break;  // datamosh — fast
-      case 1: duration = 0.6 + Math.random() * 1.5; break;   // tessellate — lingers
-      case 2: duration = 0.1 + Math.random() * 0.8; break;   // strobe
-      case 3: duration = 0.4 + Math.random() * 1.2; break;   // mirror
-      case 4: duration = 0.3 + Math.random() * 1.0; break;   // kaleido
-      case 5: duration = 0.15 + Math.random() * 0.5; break;  // sort
-      case 6: duration = 0.2 + Math.random() * 0.6; break;   // chroma
-      case 7: duration = 0.05 + Math.random() * 0.25; break; // invert — flash
-      default: duration = 0.5;
-    }
-
-    // Random parameters per type
-    let param1, param2, param3;
-    switch (type) {
-      case 0: param1 = 10 + Math.random() * 40; param2 = 0; param3 = 0; break; // mosh block size
-      case 1: param1 = 15 + Math.random() * 80; param2 = 0; param3 = 0; break; // tess scale
-      case 2: param1 = 4 + Math.random() * 24; param2 = 0; param3 = 0; break;  // strobe Hz
-      case 3: param1 = Math.random() * Math.PI * 2; param2 = 0; param3 = 0; break; // mirror angle
-      case 4: param1 = Math.random() * Math.PI * 2; param2 = 0; param3 = 0; break; // kaleido angle
-      case 5: param1 = Math.random() < 0.5 ? 0 : 1; param2 = 0; param3 = 0; break; // sort dir
-      case 6: param1 = 0; param2 = 0; param3 = 0; break; // chroma — params from startT hash
-      case 7: param1 = 0; param2 = 0; param3 = 0; break;
-      default: param1 = 0; param2 = 0; param3 = 0;
-    }
-
-    // Intensity scales with velocity but also random
-    const baseIntensity = 0.4 + Math.random() * 0.6;
-    const velMult = 0.6 + Math.min(velocity, 3.0) * 0.3;
-    const intensity = Math.min(1.5, baseIntensity * velMult);
-
-    // Zone — can be local to touch, or explode across screen randomly
-    const localZone = Math.random() < 0.55;
-    const zoneR = localZone
-      ? 0.15 + Math.random() * 0.35
-      : 0.7 + Math.random() * 0.6; // near-full-screen
-
-    // Offset the zone center randomly — chaos doesn't have to happen where you touched
-    const offsetR = localZone ? 0 : Math.random() * 0.4;
-    const offsetA = Math.random() * Math.PI * 2;
-    const zoneX = cx + Math.cos(offsetA) * offsetR * window.innerWidth * DPR;
-    const zoneY = cy + Math.sin(offsetA) * offsetR * window.innerHeight * DPR;
-
-    packets[slot + 0] = type;
-    packets[slot + 1] = intensity;
-    packets[slot + 2] = zoneX;
-    packets[slot + 3] = zoneY;
-    packets[slot + 4] = now;
-    packets[slot + 5] = duration;
-    packets[slot + 6] = param1;
-    packets[slot + 7] = param2;
-    packets[slot + 8] = param3;
-    packets[slot + 9] = 0;
-    packets[slot + 10] = 0;
-    packets[slot + 11] = zoneR;
-
-    pktIdx = (pktIdx + 1) % MAX_PACKETS;
-  }
-}
-
-function track(x, y) {
-  const now = performance.now();
-  let velocity = 0;
-
-  if (lastTouch.hasLast) {
-    const dt = (now - lastTouch.time) / 1000;
-    const dx = x - lastTouch.x;
-    const dy = y - lastTouch.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    velocity = dt > 0 ? (dist / dt) / 1000 : 0; // normalized speed
-  }
-  lastTouch = { x, y, time: now, hasLast: true };
-
-  recordImpression(x, y);
-  fireChaos(x, y, velocity);
-}
-
-canvas.addEventListener('mousemove', e => track(e.clientX, e.clientY));
-canvas.addEventListener('mousedown', e => track(e.clientX, e.clientY));
-canvas.addEventListener('touchstart', e => {
-  e.preventDefault();
-  const t = e.touches[0];
-  track(t.clientX, t.clientY);
-}, { passive: false });
-canvas.addEventListener('touchmove', e => {
-  e.preventDefault();
-  const t = e.touches[0];
-  track(t.clientX, t.clientY);
-}, { passive: false });
-canvas.addEventListener('touchend', () => { lastTouch.hasLast = false; });
-
-function render() {
-  const t = (performance.now() - start) / 1000;
-
-  // Decay impressions
-  for (let i = 0; i < MAX_IMPRESSIONS; i++) {
-    if (t - impressions[i * 4 + 2] > IMP_LIFE) impressions[i * 4 + 3] = 0;
-  }
-  // Expire packets
-  for (let i = 0; i < MAX_PACKETS; i++) {
-    const age = t - packets[i * 12 + 4];
-    if (age > packets[i * 12 + 5]) packets[i * 12 + 1] = 0;
-  }
-
-  gl.uniform2f(uRes, canvas.width, canvas.height);
-  gl.uniform1f(uTime, t);
-  for (let i = 0; i < MAX_IMPRESSIONS; i++) {
-    gl.uniform4f(uImp[i],
-      impressions[i * 4],
-      impressions[i * 4 + 1],
-      impressions[i * 4 + 2],
-      impressions[i * 4 + 3]
-    );
-  }
-  gl.uniform1fv(uPkt, packets);
-
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  requestAnimationFrame(render);
-}
-render();
-
+  showErr(
+    'WebGL OK\n' +
+    'Max frag uniforms: ' + maxFragUniforms + ' vec4 (' + (maxFragUniforms * 4) + ' floats)\n' +
+    'Max vert uniforms: ' + maxVertUniforms + ' vec4\n' +
+    'Packet array: 96 floats = ' + (96/4) + ' vec4\n' +
+    'Impression array: 16 vec4 = 64 floats\n' +
+    'Total needed: ~' + (24 + 16 + 1) + ' vec4\n\n' +
+    'Uniform test PASSED. Shader complexity may be the real issue.'
+  );
+} catch (e) {
+  showErr('ERROR:\n' + e.message);
 }
 </script>
 </body>
