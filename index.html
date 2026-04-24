@@ -11,16 +11,44 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none; }
 #stage { position: fixed; inset: 0; overflow: hidden; touch-action: none; }
-#base, #overlay, #text {
+#base, #overlay, #text, #tearCanvas {
   position: absolute; inset: 0; width: 100%; height: 100%; display: block;
 }
 #base { z-index: 1; }
 #overlay { z-index: 2; mix-blend-mode: screen; pointer-events: none; }
-#text {
-  z-index: 3;
+#text { z-index: 3; pointer-events: none; mix-blend-mode: screen; }
+#tearCanvas { z-index: 4; pointer-events: none; }
+
+#plusContainer {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%) scale(0);
+  z-index: 5;
+  width: 96px; height: 96px;
   pointer-events: none;
-  mix-blend-mode: screen;
+  opacity: 0;
+  transition: opacity 0.6s ease;
 }
+#plusContainer.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+#plus {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  position: relative;
+}
+#plus svg {
+  width: 100%; height: 100%;
+  filter: drop-shadow(0 0 12px rgba(255,255,255,0.35));
+  animation: plusBreath 3.2s ease-in-out infinite;
+}
+@keyframes plusBreath {
+  0%, 100% { transform: scale(1); filter: drop-shadow(0 0 12px rgba(255,255,255,0.35)); }
+  50% { transform: scale(1.04); filter: drop-shadow(0 0 24px rgba(255,255,255,0.6)); }
+}
+
 #stage[data-invert="1"] #base { filter: invert(1) hue-rotate(180deg); }
 #stage[data-strobe="1"] #base { filter: contrast(2.5) saturate(3); }
 #stage[data-strobe="1"][data-invert="1"] #base { filter: invert(1) contrast(2.5) saturate(3); }
@@ -31,6 +59,15 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
   <canvas id="base"></canvas>
   <canvas id="overlay"></canvas>
   <canvas id="text"></canvas>
+  <canvas id="tearCanvas"></canvas>
+  <div id="plusContainer">
+    <div id="plus">
+      <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+        <path d="M 50 28 L 50 72 M 28 50 L 72 50" stroke="#fff" stroke-width="5" stroke-linecap="round" fill="none"/>
+      </svg>
+    </div>
+  </div>
 </div>
 <script>
 // =============================================================
@@ -62,9 +99,6 @@ function rgbStr(rgb, a) { return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`; }
 function randomPalette() { return PALETTES[PALETTE_KEYS[Math.floor(Math.random() * PALETTE_KEYS.length)]]; }
 function pickColor(palette) { return hexToRgb(palette.colors[Math.floor(Math.random() * palette.colors.length)]); }
 
-// =============================================================
-//  INTEGRATION VOCABULARY — what BLPCK wants to know
-// =============================================================
 const INTEGRATIONS = [
   'Facebook', 'Instagram', 'Twitter', 'X', 'TikTok', 'YouTube',
   'Spotify', 'Apple Music', 'Tidal', 'SoundCloud', 'Bandcamp',
@@ -80,11 +114,9 @@ const INTEGRATIONS = [
   'Memory', 'Intent', 'Want', 'Fear', 'Hope'
 ];
 
-// Matrix scramble glyphs
 const GLYPHS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ01アカサタナハマヤラワ#$%&*+=<>/\\|[]{}';
 function randomGlyph() { return GLYPHS[Math.floor(Math.random() * GLYPHS.length)]; }
 
-// Font library — loaded via Google Fonts in <head>
 const FONTS = [
   'VT323', 'Share Tech Mono', 'Space Mono', 'IBM Plex Mono', 'DM Mono',
   'JetBrains Mono', 'Nova Mono', 'Syne Mono', 'Major Mono Display',
@@ -92,21 +124,19 @@ const FONTS = [
   'Rubik Glitch', 'Rubik Microbe',
   'Playfair Display', 'Fraunces', 'Cormorant Garamond'
 ];
+function pickFont() { return FONTS[Math.floor(Math.random() * FONTS.length)]; }
 
-function pickFont() {
-  return FONTS[Math.floor(Math.random() * FONTS.length)];
-}
-
-// =============================================================
-//  BASE WEBGL LAYER
-// =============================================================
 const baseCanvas = document.getElementById('base');
 const overlayCanvas = document.getElementById('overlay');
 const textCanvas = document.getElementById('text');
+const tearCanvas = document.getElementById('tearCanvas');
+const plusContainer = document.getElementById('plusContainer');
+const plusBtn = document.getElementById('plus');
 const stage = document.getElementById('stage');
 const gl = baseCanvas.getContext('webgl') || baseCanvas.getContext('experimental-webgl');
 const ctx2d = overlayCanvas.getContext('2d');
 const ctxText = textCanvas.getContext('2d');
+const ctxTear = tearCanvas.getContext('2d');
 
 if (!gl) { document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>'; } else {
 
@@ -162,7 +192,6 @@ float warpedFbm(vec2 p, float t) {
                 fbm(p + 4.0 * q + vec2(8.3, 2.8) - t * 0.02));
   return fbm(p + 4.0 * r);
 }
-
 vec3 sampleField(vec2 uv) {
   vec2 p = uv;
   p.x *= u_res.x / u_res.y;
@@ -226,7 +255,6 @@ vec3 sampleField(vec2 uv) {
   col *= tension;
   return col;
 }
-
 void main() {
   vec2 uv = v_uv;
   vec3 col = sampleField(uv);
@@ -260,20 +288,17 @@ function compile(type, src) {
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
   return s;
 }
-
 const prog = gl.createProgram();
 gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
 gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
 gl.linkProgram(prog);
 gl.useProgram(prog);
-
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
 const pLoc = gl.getAttribLocation(prog, 'p');
 gl.enableVertexAttribArray(pLoc);
 gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 0, 0);
-
 const uRes = gl.getUniformLocation(prog, 'u_res');
 const uTime = gl.getUniformLocation(prog, 'u_time');
 const uChroma = gl.getUniformLocation(prog, 'u_chromaticAberration');
@@ -303,129 +328,196 @@ function resize() {
   baseCanvas.width = W * DPR; baseCanvas.height = H * DPR;
   overlayCanvas.width = W; overlayCanvas.height = H;
   textCanvas.width = W * DPR; textCanvas.height = H * DPR;
+  ctxText.setTransform(1, 0, 0, 1, 0, 0);
   ctxText.scale(DPR, DPR);
+  tearCanvas.width = W * DPR; tearCanvas.height = H * DPR;
+  ctxTear.setTransform(1, 0, 0, 1, 0, 0);
+  ctxTear.scale(DPR, DPR);
   gl.viewport(0, 0, baseCanvas.width, baseCanvas.height);
 }
 resize();
 window.addEventListener('resize', resize);
 
 // =============================================================
-//  TEXT FRAGMENTS — matrix/DMT word system
+//  TEAR / REVEAL STATE MACHINE
+//  States: 'virgin' → 'tearing' → 'revealed'
+//  Triggers on 3rd distinct touch
+// =============================================================
+const TEAR_THRESHOLD = 3;
+let distinctTouches = 0;
+let revealState = 'virgin';
+let tearStartTime = 0;
+let tearOriginX = 0, tearOriginY = 0;
+const TEAR_DURATION = 1.8;
+
+function triggerTear(x, y) {
+  if (revealState !== 'virgin') return;
+  revealState = 'tearing';
+  tearOriginX = x;
+  tearOriginY = y;
+  tearStartTime = (performance.now() - start) / 1000;
+
+  // Haptic burst — as many impressions as possible at the tear point
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2;
+    recordImpression(x + Math.cos(angle) * 30, y + Math.sin(angle) * 30);
+  }
+
+  // Trigger a chaos burst at the tear point
+  for (let i = 0; i < 4; i++) fireChaos(x, y, 3);
+
+  // Schedule plus reveal
+  setTimeout(() => {
+    plusContainer.classList.add('visible');
+    plusContainer.animate([
+      { transform: 'translate(-50%, -50%) scale(0) rotate(-180deg)', opacity: 0 },
+      { transform: 'translate(-50%, -50%) scale(1.15) rotate(10deg)', opacity: 1, offset: 0.75 },
+      { transform: 'translate(-50%, -50%) scale(1) rotate(0deg)', opacity: 1 }
+    ], { duration: 900, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'forwards' });
+    revealState = 'revealed';
+  }, TEAR_DURATION * 1000 * 0.55);
+}
+
+function drawTear(now) {
+  ctxTear.clearRect(0, 0, W, H);
+  if (revealState === 'virgin') return;
+
+  const age = now - tearStartTime;
+  if (age > TEAR_DURATION && revealState === 'revealed') return;
+
+  const progress = Math.min(1, age / TEAR_DURATION);
+
+  // Expanding black void from tear origin — eats through the field
+  const maxR = Math.max(W, H) * 1.4;
+  const r = progress * maxR;
+
+  // Ragged edge via radial gradient with noise
+  const grad = ctxTear.createRadialGradient(tearOriginX, tearOriginY, 0, tearOriginX, tearOriginY, r);
+  grad.addColorStop(0, 'rgba(0,0,0,1)');
+  grad.addColorStop(0.7, 'rgba(0,0,0,0.95)');
+  grad.addColorStop(0.92, 'rgba(0,0,0,0.7)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctxTear.fillStyle = grad;
+  ctxTear.fillRect(0, 0, W, H);
+
+  // Torn edge flicker — irregular white sparks along the boundary
+  const sparkCount = 40;
+  for (let i = 0; i < sparkCount; i++) {
+    const a = (i / sparkCount) * Math.PI * 2 + now * 0.5;
+    const radialNoise = 0.85 + Math.sin(now * 8 + i * 2.3) * 0.12;
+    const sx = tearOriginX + Math.cos(a) * r * radialNoise;
+    const sy = tearOriginY + Math.sin(a) * r * radialNoise;
+    if (sx < -10 || sx > W + 10 || sy < -10 || sy > H + 10) continue;
+    const sparkSize = 1 + Math.random() * 3;
+    const sparkAlpha = (1 - progress * 0.6) * (0.4 + Math.random() * 0.5);
+    ctxTear.fillStyle = `rgba(255, 255, 255, ${sparkAlpha})`;
+    ctxTear.beginPath();
+    ctxTear.arc(sx, sy, sparkSize, 0, Math.PI * 2);
+    ctxTear.fill();
+  }
+
+  // Light rim at the edge of the tear
+  ctxTear.strokeStyle = `rgba(255, 255, 255, ${0.25 * (1 - progress)})`;
+  ctxTear.lineWidth = 2;
+  ctxTear.beginPath();
+  ctxTear.arc(tearOriginX, tearOriginY, r * 0.95, 0, Math.PI * 2);
+  ctxTear.stroke();
+}
+
+// Plus button interaction — pulse + chaos when tapped
+plusBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const rect = plusBtn.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  recordImpression(cx, cy);
+  for (let i = 0; i < 3; i++) fireChaos(cx, cy, 2);
+  plusBtn.animate([
+    { transform: 'scale(1)' },
+    { transform: 'scale(0.88)' },
+    { transform: 'scale(1.08)' },
+    { transform: 'scale(1)' }
+  ], { duration: 420, easing: 'cubic-bezier(0.34, 1.56, 0.64, 1)' });
+});
+
+// =============================================================
+//  TEXT FRAGMENTS
 // =============================================================
 const textFragments = [];
-
 function spawnTextFragment(x, y) {
   const word = INTEGRATIONS[Math.floor(Math.random() * INTEGRATIONS.length)];
   const font = pickFont();
-  const size = 9 + Math.random() * 18; // 9-27px, mostly small
-  const angle = (Math.random() - 0.5) * 0.4; // slight rotation
+  const size = 9 + Math.random() * 18;
+  const angle = (Math.random() - 0.5) * 0.4;
   const driftAngle = Math.random() * Math.PI * 2;
   const driftSpeed = 0.15 + Math.random() * 0.8;
-
-  // Random effect flavor
   const flavors = ['clean', 'glitch', 'mirror', 'upside', 'scrambled'];
   const flavor = flavors[Math.floor(Math.random() * flavors.length)];
-
-  // Scramble duration before resolving
   const scrambleDur = 0.15 + Math.random() * 0.6;
   const stableDur = 0.4 + Math.random() * 1.5;
   const fadeDur = 0.6 + Math.random() * 1.2;
-
   textFragments.push({
-    word, font, size, angle,
-    x, y,
+    word, font, size, angle, x, y,
     vx: Math.cos(driftAngle) * driftSpeed,
-    vy: Math.sin(driftAngle) * driftSpeed - 0.2, // slight upward bias
+    vy: Math.sin(driftAngle) * driftSpeed - 0.2,
     startTime: (performance.now() - start) / 1000,
-    scrambleDur,
-    stableDur,
-    fadeDur,
+    scrambleDur, stableDur, fadeDur,
     total: scrambleDur + stableDur + fadeDur,
-    flavor,
-    palette: randomPalette(),
-    seed: Math.random() * 1000
+    flavor, palette: randomPalette(), seed: Math.random() * 1000
   });
-
   if (textFragments.length > 40) textFragments.splice(0, textFragments.length - 40);
 }
-
 function renderTextFragments(now) {
   ctxText.clearRect(0, 0, W, H);
-
   for (const f of textFragments) {
     const age = now - f.startTime;
     if (age < 0 || age > f.total) continue;
-
-    // Position with drift
     const px = f.x + f.vx * age * 40;
     const py = f.y + f.vy * age * 40;
-
-    // Determine phase
-    let alpha = 1;
-    let displayWord = f.word;
-
+    let alpha = 1; let displayWord = f.word;
     if (age < f.scrambleDur) {
-      // Scramble phase
       const progress = age / f.scrambleDur;
       alpha = progress;
       const scrambleChars = Math.floor((1 - progress) * f.word.length);
       let scrambled = '';
       for (let i = 0; i < f.word.length; i++) {
-        if (i < f.word.length - scrambleChars) {
-          scrambled += f.word[i];
-        } else {
-          scrambled += randomGlyph();
-        }
+        scrambled += i < f.word.length - scrambleChars ? f.word[i] : randomGlyph();
       }
       displayWord = scrambled;
     } else if (age < f.scrambleDur + f.stableDur) {
       alpha = 1;
-      // Occasional glitch substitution
       if (f.flavor === 'glitch' && Math.random() < 0.15) {
         const i = Math.floor(Math.random() * f.word.length);
         displayWord = f.word.slice(0, i) + randomGlyph() + f.word.slice(i + 1);
       } else if (f.flavor === 'scrambled' && Math.random() < 0.3) {
         let s = '';
-        for (let i = 0; i < f.word.length; i++) {
-          s += Math.random() < 0.3 ? randomGlyph() : f.word[i];
-        }
+        for (let i = 0; i < f.word.length; i++) s += Math.random() < 0.3 ? randomGlyph() : f.word[i];
         displayWord = s;
       }
     } else {
-      // Fade phase
       const fadeAge = age - f.scrambleDur - f.stableDur;
       alpha = 1 - (fadeAge / f.fadeDur);
     }
-
-    // Pick color from event's palette
     const rgb = pickColor(f.palette);
-
     ctxText.save();
     ctxText.translate(px, py);
     ctxText.rotate(f.angle);
-
-    // Apply flavor transforms
     if (f.flavor === 'mirror') ctxText.scale(-1, 1);
     if (f.flavor === 'upside') ctxText.scale(1, -1);
-
     ctxText.font = `${f.size}px "${f.font}", monospace`;
     ctxText.textAlign = 'center';
     ctxText.textBaseline = 'middle';
-
-    // Slight blur/glow — double stroke for atmosphere
     ctxText.fillStyle = rgbStr(rgb, alpha * 0.25);
     ctxText.fillText(displayWord, 1, 1);
     ctxText.fillText(displayWord, -1, -1);
-
     ctxText.fillStyle = rgbStr(rgb, alpha * 0.95);
     ctxText.fillText(displayWord, 0, 0);
-
     ctxText.restore();
   }
 }
 
 // =============================================================
-//  CHAOS ENGINE (unchanged from last version)
+//  CHAOS ENGINE
 // =============================================================
 const chaosEvents = [];
 let impIdx = 0;
@@ -434,7 +526,7 @@ let lastTouch = { x: 0, y: 0, time: 0, hasLast: false };
 
 function recordImpression(x, y) {
   const now = (performance.now() - start) / 1000;
-  impressions[impIdx * 4]     = x * DPR;
+  impressions[impIdx * 4] = x * DPR;
   impressions[impIdx * 4 + 1] = (H - y) * DPR;
   impressions[impIdx * 4 + 2] = now;
   impressions[impIdx * 4 + 3] = 1.0;
@@ -466,17 +558,27 @@ function fireChaos(x, y, velocity) {
       default: duration = 0.5;
     }
     chaosEvents.push({
-      type, intensity, x, y,
-      startTime: now, duration,
-      seed: Math.random() * 1000,
-      param: Math.random(), param2: Math.random(),
+      type, intensity, x, y, startTime: now, duration,
+      seed: Math.random() * 1000, param: Math.random(), param2: Math.random(),
       palette, eventColors
     });
   }
   if (chaosEvents.length > 20) chaosEvents.splice(0, chaosEvents.length - 20);
 }
 
-function track(x, y) {
+// Track distinct touches — only count if spatially/temporally separated from previous
+let lastDistinctTouchTime = 0;
+let lastDistinctTouchX = -999, lastDistinctTouchY = -999;
+
+function isDistinctTouch(x, y, now) {
+  const dt = now - lastDistinctTouchTime;
+  const dx = x - lastDistinctTouchX;
+  const dy = y - lastDistinctTouchY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  return dt > 200 || dist > 60;
+}
+
+function track(x, y, isDiscrete) {
   const now = performance.now();
   let velocity = 0;
   if (lastTouch.hasLast) {
@@ -489,11 +591,19 @@ function track(x, y) {
   recordImpression(x, y);
   fireChaos(x, y, velocity);
 
-  // 80% chance to spawn text fragment(s) on each touch
+  // Count distinct touches for tear threshold
+  if (isDiscrete && revealState === 'virgin' && isDistinctTouch(x, y, now)) {
+    distinctTouches++;
+    lastDistinctTouchTime = now;
+    lastDistinctTouchX = x; lastDistinctTouchY = y;
+    if (distinctTouches >= TEAR_THRESHOLD) {
+      triggerTear(x, y);
+    }
+  }
+
   if (Math.random() < 0.8) {
-    const wordCount = 1 + Math.floor(Math.random() * 3); // 1-3 words
+    const wordCount = 1 + Math.floor(Math.random() * 3);
     for (let i = 0; i < wordCount; i++) {
-      // Slight spatial scatter around touch point
       const offsetX = (Math.random() - 0.5) * 40;
       const offsetY = (Math.random() - 0.5) * 40;
       spawnTextFragment(x + offsetX, y + offsetY);
@@ -501,17 +611,17 @@ function track(x, y) {
   }
 }
 
-stage.addEventListener('mousemove', e => track(e.clientX, e.clientY));
-stage.addEventListener('mousedown', e => track(e.clientX, e.clientY));
+stage.addEventListener('mousemove', e => track(e.clientX, e.clientY, false));
+stage.addEventListener('mousedown', e => track(e.clientX, e.clientY, true));
 stage.addEventListener('touchstart', e => {
   e.preventDefault();
   const t = e.touches[0];
-  track(t.clientX, t.clientY);
+  track(t.clientX, t.clientY, true);
 }, { passive: false });
 stage.addEventListener('touchmove', e => {
   e.preventDefault();
   const t = e.touches[0];
-  track(t.clientX, t.clientY);
+  track(t.clientX, t.clientY, false);
 }, { passive: false });
 stage.addEventListener('touchend', () => { lastTouch.hasLast = false; });
 
@@ -535,8 +645,7 @@ function drawOverlay(now) {
           }
         }
       }
-    }
-    else if (ev.type === 'datamosh') {
+    } else if (ev.type === 'datamosh') {
       const blockH = 4 + ev.param * 20;
       const blocks = Math.ceil(H / blockH);
       for (let i = 0; i < blocks; i++) {
@@ -545,8 +654,7 @@ function drawOverlay(now) {
         ctx2d.fillStyle = rgbStr(ev.eventColors[colorIdx], 0.3 * life * ev.intensity);
         ctx2d.fillRect(shift - W, i * blockH, W * 2, blockH - 1);
       }
-    }
-    else if (ev.type === 'scanline') {
+    } else if (ev.type === 'scanline') {
       const scanCount = 4 + Math.floor(ev.param * 8);
       for (let i = 0; i < scanCount; i++) {
         const y = (ev.seed * 37 + i * 91 + now * 200) % H;
@@ -555,8 +663,7 @@ function drawOverlay(now) {
         ctx2d.fillStyle = rgbStr(rgb, 0.85 * life);
         ctx2d.fillRect(0, y, W, lineH);
       }
-    }
-    else if (ev.type === 'colorburst') {
+    } else if (ev.type === 'colorburst') {
       const maxR = Math.max(W, H) * 1.2;
       const r = age * maxR * 2;
       const c1 = ev.eventColors[0];
@@ -574,7 +681,6 @@ function drawOverlay(now) {
 
 function render() {
   const t = (performance.now() - start) / 1000;
-
   if (t > nextBasePaletteAt && !paletteBlending) {
     paletteBlending = true;
     const next = randomPalette();
@@ -591,7 +697,6 @@ function render() {
       nextBasePaletteAt = t + 25 + Math.random() * 15;
     }
   }
-
   for (let i = 0; i < MAX_IMPRESSIONS; i++) {
     if (t - impressions[i * 4 + 2] > IMP_LIFE) impressions[i * 4 + 3] = 0;
   }
@@ -638,6 +743,7 @@ function render() {
 
   drawOverlay(t);
   renderTextFragments(t);
+  drawTear(t);
   requestAnimationFrame(render);
 }
 render();
