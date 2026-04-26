@@ -316,7 +316,6 @@ function triggerTear(x, y) {
   }
   for (let i = 0; i < 4; i++) fireChaos(x, y, 3);
 
-  // Place plus at tear origin first (no transition)
   plusContainer.style.transition = 'none';
   plusContainer.style.top = y + 'px';
   plusContainer.style.left = x + 'px';
@@ -329,7 +328,6 @@ function triggerTear(x, y) {
       { transform: 'scale(1) rotate(0deg)', opacity: 1 }
     ], { duration: 700, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'forwards' });
 
-    // Restore the transition AND animate to center on the next frame
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         plusContainer.style.transition = '';
@@ -434,16 +432,22 @@ function placeOrbits() {
 function openPanel() {
   if (panelOpen) return;
   panelOpen = true;
-  plusContainer.classList.add('panelOpen');
   markComplete('plus');
-  // Reset orbits to center first, then place — gives the browser one frame
-  // to paint them at center before transitioning to orbit positions
+  // Force every orbit to center with NO transition
   Object.values(orbits).forEach(el => {
     if (el.style.display === 'none') return;
+    el.style.transition = 'none';
     el.style.transform = 'translate(0, 0)';
   });
+  // Force a synchronous reflow so the browser commits these styles
+  void plusContainer.offsetHeight;
+  // Now add the open class and re-enable transitions before placing
+  plusContainer.classList.add('panelOpen');
   requestAnimationFrame(() => {
-    requestAnimationFrame(() => placeOrbits());
+    Object.values(orbits).forEach(el => {
+      el.style.transition = '';
+    });
+    placeOrbits();
   });
 }
 function closePanel() {
