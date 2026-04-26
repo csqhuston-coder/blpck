@@ -128,6 +128,13 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 
 #fileInput { display: none; }
 
+#resetFlash {
+  position: fixed; inset: 0; z-index: 9999;
+  background: white; opacity: 0; pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+#resetFlash.fire { opacity: 0.9; }
+
 #stage[data-invert="1"] #base { filter: invert(1) hue-rotate(180deg); }
 #stage[data-strobe="1"] #base { filter: contrast(2.5) saturate(3); }
 #stage[data-strobe="1"][data-invert="1"] #base { filter: invert(1) contrast(2.5) saturate(3); }
@@ -164,6 +171,7 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 
   <input id="fileInput" type="file" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt">
 </div>
+<div id="resetFlash"></div>
 
 <script>
 const LOOPS = {
@@ -223,6 +231,7 @@ const tearCanvas = document.getElementById('tearCanvas');
 const plusContainer = document.getElementById('plusContainer');
 const plusBtn = document.getElementById('plus');
 const stage = document.getElementById('stage');
+const resetFlash = document.getElementById('resetFlash');
 const gl = baseCanvas.getContext('webgl') || baseCanvas.getContext('experimental-webgl');
 const ctx2d = overlayCanvas.getContext('2d');
 const ctxText = textCanvas.getContext('2d');
@@ -350,9 +359,9 @@ const ORBIT_RADIUS = 140;
 let panelOpen = false;
 
 const ICON_SVG = {
-  paperclip: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 38 38 L 38 62 C 38 70, 50 70, 50 62 L 50 35 C 50 30, 58 30, 58 35 L 58 60" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round"/></svg>`,
+  paperclip: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 60 32 L 60 62 C 60 70, 48 72, 44 65 C 41 60, 42 54, 47 50 L 60 38 C 62 36, 65 36, 67 38 C 69 40, 69 43, 67 45 L 50 62" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   text: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 32 40 L 68 40 M 32 50 L 68 50 M 32 60 L 56 60" stroke="#fff" stroke-width="3.5" stroke-linecap="round" fill="none"/></svg>`,
-  mic: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><rect x="42" y="28" width="16" height="28" rx="8" fill="none" stroke="#fff" stroke-width="3.5"/><path d="M 34 50 C 34 60, 66 60, 66 50 M 50 62 L 50 70" stroke="#fff" stroke-width="3.5" stroke-linecap="round" fill="none"/></svg>`,
+  mic: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><rect x="42" y="26" width="16" height="32" rx="8" fill="#fff"/><path d="M 32 50 C 32 60, 68 60, 68 50 M 50 64 L 50 72" stroke="#fff" stroke-width="3" stroke-linecap="round" fill="none"/></svg>`,
   observe: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 22 50 Q 50 28, 78 50 Q 50 72, 22 50 Z" fill="none" stroke="#fff" stroke-width="3"/><circle cx="50" cy="50" r="7" fill="#fff"/></svg>`,
   offer: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="50" cy="50" r="20" fill="none" stroke="#fff" stroke-width="3"/><circle cx="50" cy="50" r="10" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="50" cy="50" r="3" fill="#fff"/></svg>`
 };
@@ -458,7 +467,7 @@ textInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !textSen
 
 const micWrap = document.getElementById('micWrap');
 const micOrb = document.getElementById('micOrb');
-const micClose = document.getElementById('micClose');
+const micCloseBtn = document.getElementById('micClose');
 function openMic() { micWrap.classList.add('open'); }
 function closeMic() { micWrap.classList.remove('open'); }
 micOrb.addEventListener('click', () => {
@@ -466,7 +475,7 @@ micOrb.addEventListener('click', () => {
   for (let i = 0; i < 4; i++) fireChaos(W/2, H/2, 2.5);
   closeMic(); closePanel();
 });
-micClose.addEventListener('click', closeMic);
+micCloseBtn.addEventListener('click', closeMic);
 
 function updateOrbitGlows(now) {
   Object.values(orbits).forEach(el => {
@@ -626,27 +635,57 @@ function isInteractiveTarget(target) {
   return target.closest('#plusContainer, #textInputWrap, #micWrap');
 }
 
-stage.addEventListener('mousemove', e => {
-  if (isInteractiveTarget(e.target)) return;
-  track(e.clientX, e.clientY, false);
-});
-stage.addEventListener('mousedown', e => {
-  if (isInteractiveTarget(e.target)) return;
-  track(e.clientX, e.clientY, true);
-});
+// ============================================================
+//  5-FINGER TAP RESET
+// ============================================================
+function fireReset() {
+  resetFlash.classList.add('fire');
+  setTimeout(() => {
+    Object.keys(localStorage).forEach(k => {
+      if (k.startsWith('blpck.')) localStorage.removeItem(k);
+    });
+    location.reload();
+  }, 200);
+}
+
 stage.addEventListener('touchstart', e => {
+  if (e.touches.length >= 5) {
+    e.preventDefault();
+    fireReset();
+    return;
+  }
   if (isInteractiveTarget(e.target)) return;
+  // If panel is open and user touched outside, close it
+  if (panelOpen) {
+    e.preventDefault();
+    closePanel();
+    return;
+  }
   e.preventDefault();
   const t = e.touches[0];
   track(t.clientX, t.clientY, true);
 }, { passive: false });
+
 stage.addEventListener('touchmove', e => {
+  if (e.touches.length >= 5) return;
   if (isInteractiveTarget(e.target)) return;
+  if (panelOpen) return;
   e.preventDefault();
   const t = e.touches[0];
   track(t.clientX, t.clientY, false);
 }, { passive: false });
+
 stage.addEventListener('touchend', () => { lastTouch.hasLast = false; });
+
+stage.addEventListener('mousemove', e => {
+  if (isInteractiveTarget(e.target) || panelOpen) return;
+  track(e.clientX, e.clientY, false);
+});
+stage.addEventListener('mousedown', e => {
+  if (isInteractiveTarget(e.target)) return;
+  if (panelOpen) { closePanel(); return; }
+  track(e.clientX, e.clientY, true);
+});
 
 function drawOverlay(now) {
   ctx2d.clearRect(0, 0, W, H);
