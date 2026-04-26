@@ -29,7 +29,7 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
   z-index: 5;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.6s ease;
+  transition: opacity 0.6s ease, top 1.0s cubic-bezier(0.16, 1, 0.3, 1), left 1.0s cubic-bezier(0.16, 1, 0.3, 1);
 }
 #plusContainer.visible { opacity: 1; pointer-events: auto; }
 
@@ -298,7 +298,11 @@ let tearStartTime = 0, tearOriginX = 0, tearOriginY = 0;
 const TEAR_DURATION = 1.8;
 
 if (TEAR_DONE) {
-  setTimeout(() => { plusContainer.classList.add('visible'); }, 300);
+  setTimeout(() => {
+    plusContainer.style.top = '50%';
+    plusContainer.style.left = '50%';
+    plusContainer.classList.add('visible');
+  }, 300);
 }
 
 function triggerTear(x, y) {
@@ -311,13 +315,29 @@ function triggerTear(x, y) {
     recordImpression(x + Math.cos(angle) * 30, y + Math.sin(angle) * 30);
   }
   for (let i = 0; i < 4; i++) fireChaos(x, y, 3);
+
+  // Place plus at tear origin first (no transition)
+  plusContainer.style.transition = 'none';
+  plusContainer.style.top = y + 'px';
+  plusContainer.style.left = x + 'px';
+
   setTimeout(() => {
     plusContainer.classList.add('visible');
     plusContainer.animate([
       { transform: 'scale(0) rotate(-180deg)', opacity: 0 },
-      { transform: 'scale(1.15) rotate(10deg)', opacity: 1, offset: 0.75 },
+      { transform: 'scale(1.15) rotate(10deg)', opacity: 1, offset: 0.6 },
       { transform: 'scale(1) rotate(0deg)', opacity: 1 }
-    ], { duration: 900, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'forwards' });
+    ], { duration: 700, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'forwards' });
+
+    // Restore the transition AND animate to center on the next frame
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        plusContainer.style.transition = '';
+        plusContainer.style.top = '50%';
+        plusContainer.style.left = '50%';
+      });
+    });
+
     revealState = 'revealed';
     localStorage.setItem('blpck.tearDone', '1');
   }, TEAR_DURATION * 1000 * 0.55);
@@ -359,9 +379,9 @@ const ORBIT_RADIUS = 140;
 let panelOpen = false;
 
 const ICON_SVG = {
-  paperclip: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 60 32 L 60 62 C 60 70, 48 72, 44 65 C 41 60, 42 54, 47 50 L 60 38 C 62 36, 65 36, 67 38 C 69 40, 69 43, 67 45 L 50 62" fill="none" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  paperclip: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 62 32 L 62 62 C 62 71, 54 76, 47 73 C 40 70, 38 62, 38 56 L 38 36 C 38 31, 42 28, 46 28 C 50 28, 54 31, 54 36 L 54 60 C 54 63, 52 65, 49 65 C 46 65, 44 63, 44 60 L 44 40" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   text: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 32 40 L 68 40 M 32 50 L 68 50 M 32 60 L 56 60" stroke="#fff" stroke-width="3.5" stroke-linecap="round" fill="none"/></svg>`,
-  mic: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><rect x="42" y="26" width="16" height="32" rx="8" fill="#fff"/><path d="M 32 50 C 32 60, 68 60, 68 50 M 50 64 L 50 72" stroke="#fff" stroke-width="3" stroke-linecap="round" fill="none"/></svg>`,
+  mic: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><rect x="42" y="28" width="16" height="26" rx="8" fill="#fff"/><path d="M 35 49 C 35 58, 65 58, 65 49 M 50 60 L 50 70 M 44 70 L 56 70" stroke="#fff" stroke-width="2.8" stroke-linecap="round" fill="none"/></svg>`,
   observe: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 22 50 Q 50 28, 78 50 Q 50 72, 22 50 Z" fill="none" stroke="#fff" stroke-width="3"/><circle cx="50" cy="50" r="7" fill="#fff"/></svg>`,
   offer: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="50" cy="50" r="20" fill="none" stroke="#fff" stroke-width="3"/><circle cx="50" cy="50" r="10" fill="none" stroke="#fff" stroke-width="2.5"/><circle cx="50" cy="50" r="3" fill="#fff"/></svg>`
 };
@@ -416,7 +436,15 @@ function openPanel() {
   panelOpen = true;
   plusContainer.classList.add('panelOpen');
   markComplete('plus');
-  placeOrbits();
+  // Reset orbits to center first, then place — gives the browser one frame
+  // to paint them at center before transitioning to orbit positions
+  Object.values(orbits).forEach(el => {
+    if (el.style.display === 'none') return;
+    el.style.transform = 'translate(0, 0)';
+  });
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => placeOrbits());
+  });
 }
 function closePanel() {
   if (!panelOpen) return;
@@ -635,9 +663,6 @@ function isInteractiveTarget(target) {
   return target.closest('#plusContainer, #textInputWrap, #micWrap');
 }
 
-// ============================================================
-//  5-FINGER TAP RESET
-// ============================================================
 function fireReset() {
   resetFlash.classList.add('fire');
   setTimeout(() => {
@@ -655,7 +680,6 @@ stage.addEventListener('touchstart', e => {
     return;
   }
   if (isInteractiveTarget(e.target)) return;
-  // If panel is open and user touched outside, close it
   if (panelOpen) {
     e.preventDefault();
     closePanel();
