@@ -20,15 +20,6 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 #text { z-index: 3; mix-blend-mode: screen; }
 #tearCanvas { z-index: 4; }
 
-#log {
-  position: fixed; top: 60px; left: 8px; right: 8px;
-  color: #0f0; font-family: monospace; font-size: 10px;
-  z-index: 9998; background: rgba(0,0,0,0.85); padding: 6px;
-  max-height: 200px; overflow: hidden;
-  border: 1px solid #0f0; pointer-events: none;
-  white-space: pre-wrap; line-height: 1.3;
-}
-
 #plusContainer {
   position: absolute;
   top: 50%; left: 50%;
@@ -144,6 +135,37 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 }
 #resetFlash.fire { opacity: 0.9; }
 
+#audioControl {
+  position: fixed;
+  top: 18px; right: 18px;
+  width: 22px; height: 22px;
+  z-index: 100;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0.55;
+  transition: opacity 0.3s ease;
+}
+#audioControl:hover, #audioControl:active { opacity: 1; }
+#audioDot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.85);
+  box-shadow: 0 0 8px rgba(255,255,255,0.4);
+  transition: transform 0.15s ease, background 0.3s ease, box-shadow 0.3s ease;
+}
+#audioControl.muted #audioDot {
+  background: rgba(255,255,255,0.25);
+  box-shadow: none;
+}
+#audioControl.muted::after {
+  content: '';
+  position: absolute;
+  width: 18px; height: 1px;
+  background: rgba(255,255,255,0.5);
+  transform: rotate(-45deg);
+}
+
 #stage[data-invert="1"] #base { filter: invert(1) hue-rotate(180deg); }
 #stage[data-strobe="1"] #base { filter: contrast(2.5) saturate(3); }
 #stage[data-strobe="1"][data-invert="1"] #base { filter: invert(1) contrast(2.5) saturate(3); }
@@ -181,12 +203,9 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
   <input id="fileInput" type="file" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt">
 </div>
 <div id="resetFlash"></div>
-<div id="log">init...</div>
+<div id="audioControl"><div id="audioDot"></div></div>
 
 <script>
-// ============================================================
-//  STATE — declared FIRST so nothing references undefined vars
-// ============================================================
 var panelOpen = false;
 var revealState = 'virgin';
 var distinctTouches = 0;
@@ -197,19 +216,6 @@ var impIdx = 0;
 var lastTouch = { x: 0, y: 0, time: 0, hasLast: false };
 var lastDistinctTouchTime = 0, lastDistinctTouchX = -999, lastDistinctTouchY = -999;
 
-// ============================================================
-//  DIAGNOSTIC LOG
-// ============================================================
-const _log = document.getElementById('log');
-const _logLines = ['init...'];
-function L(m) {
-  const t = new Date().toTimeString().slice(3,8);
-  _logLines.unshift(t + ' ' + m);
-  if (_logLines.length > 14) _logLines.pop();
-  _log.innerText = _logLines.join('\n');
-}
-window.addEventListener('error', e => L('ERR ' + e.message));
-
 const LOOPS = {
   plus:      !!localStorage.getItem('blpck.plus'),
   paperclip: !!localStorage.getItem('blpck.paperclip'),
@@ -218,7 +224,6 @@ const LOOPS = {
 };
 const TEAR_DONE = !!localStorage.getItem('blpck.tearDone');
 revealState = TEAR_DONE ? 'revealed' : 'virgin';
-L('tear='+TEAR_DONE+' panelOpen='+panelOpen);
 
 function markComplete(loop) {
   if (!LOOPS[loop]) {
@@ -271,12 +276,212 @@ const plusContainer = document.getElementById('plusContainer');
 const plusBtn = document.getElementById('plus');
 const stage = document.getElementById('stage');
 const resetFlash = document.getElementById('resetFlash');
+const audioControl = document.getElementById('audioControl');
+const audioDot = document.getElementById('audioDot');
 const gl = baseCanvas.getContext('webgl') || baseCanvas.getContext('experimental-webgl');
 const ctx2d = overlayCanvas.getContext('2d');
 const ctxText = textCanvas.getContext('2d');
 const ctxTear = tearCanvas.getContext('2d');
 
 if (!gl) { document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>'; } else {
+
+// ============================================================
+//  AUDIO ENGINE — generative ambient field
+// ============================================================
+let audioCtx = null;
+let masterGain = null;
+let masterFilter = null;
+let droneNodes = null;
+let audioMuted = !!localStorage.getItem('blpck.audioMuted');
+let audioStarted = false;
+let lastTapAudioTime = 0;
+let recentTapCount = 0;
+let droneIntensity = 0;
+let droneTargetIntensity = 0;
+
+const PENTATONIC = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25, 783.99, 880.00];
+function pickPentatonic() { return PENTATONIC[Math.floor(Math.random() * PENTATONIC.length)]; }
+
+function initAudio() {
+  if (audioStarted) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new Ctx();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = audioMuted ? 0 : 0.4;
+
+    masterFilter = audioCtx.createBiquadFilter();
+    masterFilter.type = 'lowpass';
+    masterFilter.frequency.value = 6000;
+    masterFilter.Q.value = 0.5;
+
+    masterFilter.connect(masterGain);
+    masterGain.connect(audioCtx.destination);
+
+    // Drone — three slowly detuning sine oscillators + soft noise wash
+    const droneGain = audioCtx.createGain();
+    droneGain.gain.value = 0;
+    droneGain.connect(masterFilter);
+
+    const oscs = [];
+    const baseFreq = 65.41; // C2
+    const detunes = [0, 7.0, 12.0]; // root, fifth, octave
+    detunes.forEach((semis, i) => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = baseFreq * Math.pow(2, semis / 12);
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0.3;
+      // very slow LFO on detune for movement
+      const lfo = audioCtx.createOscillator();
+      lfo.frequency.value = 0.05 + Math.random() * 0.08;
+      const lfoGain = audioCtx.createGain();
+      lfoGain.gain.value = 4 + Math.random() * 6;
+      lfo.connect(lfoGain);
+      lfoGain.connect(osc.detune);
+      osc.connect(gain);
+      gain.connect(droneGain);
+      osc.start();
+      lfo.start();
+      oscs.push({ osc, gain, lfo });
+    });
+
+    // Noise wash
+    const noiseBufferSize = audioCtx.sampleRate * 4;
+    const noiseBuffer = audioCtx.createBuffer(1, noiseBufferSize, audioCtx.sampleRate);
+    const noiseData = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < noiseBufferSize; i++) noiseData[i] = (Math.random() * 2 - 1) * 0.15;
+    const noiseSource = audioCtx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
+    noiseSource.loop = true;
+    const noiseFilter = audioCtx.createBiquadFilter();
+    noiseFilter.type = 'bandpass';
+    noiseFilter.frequency.value = 800;
+    noiseFilter.Q.value = 0.7;
+    const noiseGain = audioCtx.createGain();
+    noiseGain.gain.value = 0.04;
+    noiseSource.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(droneGain);
+    noiseSource.start();
+
+    droneNodes = { droneGain, oscs, noiseSource, noiseGain, noiseFilter };
+
+    audioStarted = true;
+  } catch (err) {
+    console.error('Audio init failed:', err);
+  }
+}
+
+function audioTap(x, y, velocity) {
+  if (!audioStarted || !audioCtx) return;
+  const now = audioCtx.currentTime;
+
+  // throttle rapid retriggering — but allow polyrhythmic density
+  if (now - lastTapAudioTime < 0.04) return;
+  lastTapAudioTime = now;
+
+  // Track recent activity to drive drone intensity
+  recentTapCount = Math.min(recentTapCount + 1, 20);
+  droneTargetIntensity = Math.min(0.4, recentTapCount / 25);
+
+  // Pitch by Y (top of screen = high, bottom = low)
+  const yNorm = 1 - (y / window.innerHeight); // 0 at bottom, 1 at top
+  const pitch = pickPentatonic() * (yNorm > 0.5 ? 2 : 1) * (yNorm > 0.85 ? 2 : 1);
+
+  // Pan by X
+  const xNorm = (x / window.innerWidth) * 2 - 1; // -1 left, +1 right
+
+  // Click: short noise burst + brief sine pluck
+  const clickGain = audioCtx.createGain();
+  const panner = audioCtx.createStereoPanner();
+  panner.pan.value = xNorm * 0.7;
+
+  // Noise burst (the click)
+  const burstSize = Math.floor(audioCtx.sampleRate * 0.012);
+  const burstBuf = audioCtx.createBuffer(1, burstSize, audioCtx.sampleRate);
+  const burstData = burstBuf.getChannelData(0);
+  for (let i = 0; i < burstSize; i++) {
+    burstData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / burstSize, 2);
+  }
+  const burst = audioCtx.createBufferSource();
+  burst.buffer = burstBuf;
+  const burstFilter = audioCtx.createBiquadFilter();
+  burstFilter.type = 'bandpass';
+  burstFilter.frequency.value = pitch * 2;
+  burstFilter.Q.value = 4;
+  const burstGain = audioCtx.createGain();
+  burstGain.gain.value = 0.18 + Math.min(velocity, 2) * 0.06;
+  burst.connect(burstFilter);
+  burstFilter.connect(burstGain);
+  burstGain.connect(panner);
+
+  // Brief sine pluck (the tone)
+  const pluck = audioCtx.createOscillator();
+  pluck.type = 'sine';
+  pluck.frequency.value = pitch;
+  const pluckGain = audioCtx.createGain();
+  pluckGain.gain.setValueAtTime(0, now);
+  pluckGain.gain.linearRampToValueAtTime(0.08 + Math.min(velocity, 2) * 0.04, now + 0.005);
+  pluckGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.6);
+  pluck.connect(pluckGain);
+  pluckGain.connect(panner);
+
+  panner.connect(masterFilter);
+
+  burst.start(now);
+  pluck.start(now);
+  pluck.stop(now + 0.7);
+
+  // Cleanup
+  setTimeout(() => {
+    try { panner.disconnect(); } catch(e) {}
+    try { pluckGain.disconnect(); } catch(e) {}
+    try { burstGain.disconnect(); } catch(e) {}
+  }, 800);
+}
+
+function updateAudioState() {
+  if (!audioStarted || !audioCtx) return;
+
+  // Decay recent tap count slowly
+  recentTapCount *= 0.985;
+  if (recentTapCount < 0.01) recentTapCount = 0;
+  droneTargetIntensity = Math.min(0.4, recentTapCount / 25);
+
+  // Smooth drone toward target
+  droneIntensity += (droneTargetIntensity - droneIntensity) * 0.02;
+  if (droneNodes) {
+    const t = audioCtx.currentTime;
+    droneNodes.droneGain.gain.setTargetAtTime(droneIntensity, t, 0.4);
+  }
+
+  // Audio dot pulse intensity reflects drone level
+  const pulseScale = 1 + droneIntensity * 1.8;
+  audioDot.style.transform = `scale(${pulseScale})`;
+}
+
+function setAudioMuted(muted) {
+  audioMuted = muted;
+  localStorage.setItem('blpck.audioMuted', muted ? '1' : '');
+  audioControl.classList.toggle('muted', muted);
+  if (audioStarted && masterGain) {
+    masterGain.gain.setTargetAtTime(muted ? 0 : 0.4, audioCtx.currentTime, 0.3);
+  }
+}
+setAudioMuted(audioMuted);
+
+audioControl.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!audioStarted) initAudio();
+  setAudioMuted(!audioMuted);
+});
+
+// ============================================================
+//  WEBGL & RENDERING
+// ============================================================
 
 const MAX_IMPRESSIONS = 16;
 const IMP_LIFE = 30.0;
@@ -446,7 +651,6 @@ Object.values(orbits).forEach(o => plusContainer.appendChild(o));
 function placeOrbits() {
   const baseIcons = ['paperclip', 'text', 'mic'];
   const icons = allLoopsComplete() ? [...baseIcons, 'observe', 'offer'] : baseIcons;
-  L('placeOrbits panel='+panelOpen+' n='+icons.length);
   Object.entries(orbits).forEach(([k, el]) => {
     el.style.display = icons.includes(k) ? '' : 'none';
   });
@@ -466,7 +670,6 @@ function placeOrbits() {
 }
 
 function openPanel() {
-  L('openPanel called, panelOpen='+panelOpen);
   if (panelOpen) return;
   panelOpen = true;
   markComplete('plus');
@@ -474,7 +677,6 @@ function openPanel() {
   placeOrbits();
 }
 function closePanel() {
-  L('closePanel called, panelOpen='+panelOpen);
   if (!panelOpen) return;
   panelOpen = false;
   plusContainer.classList.remove('panelOpen');
@@ -482,7 +684,6 @@ function closePanel() {
 }
 
 plusBtn.addEventListener('click', (e) => {
-  L('PLUS click panelOpen='+panelOpen);
   e.stopPropagation();
   if (panelOpen) closePanel(); else openPanel();
 });
@@ -663,6 +864,7 @@ function isDistinctTouch(x, y, now) {
 }
 
 function track(x, y, isDiscrete) {
+  if (!audioStarted) initAudio();
   const now = performance.now();
   let velocity = 0;
   if (lastTouch.hasLast) {
@@ -672,6 +874,7 @@ function track(x, y, isDiscrete) {
   lastTouch = { x, y, time: now, hasLast: true };
   recordImpression(x, y);
   fireChaos(x, y, velocity);
+  audioTap(x, y, velocity);
   if (isDiscrete && revealState === 'virgin' && isDistinctTouch(x, y, now)) {
     distinctTouches++;
     lastDistinctTouchTime = now; lastDistinctTouchX = x; lastDistinctTouchY = y;
@@ -686,7 +889,7 @@ function track(x, y, isDiscrete) {
 }
 
 function isInteractiveTarget(target) {
-  return target.closest('#plusContainer, #textInputWrap, #micWrap');
+  return target.closest('#plusContainer, #textInputWrap, #micWrap, #audioControl');
 }
 
 function fireReset() {
@@ -830,6 +1033,7 @@ function render() {
   renderTextFragments(t);
   drawTear(t);
   updateOrbitGlows(performance.now());
+  updateAudioState();
   requestAnimationFrame(render);
 }
 render();
