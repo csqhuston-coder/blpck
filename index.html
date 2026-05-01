@@ -184,7 +184,22 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 <div id="log">init...</div>
 
 <script>
-// =============== DIAGNOSTIC LOG ===============
+// ============================================================
+//  STATE — declared FIRST so nothing references undefined vars
+// ============================================================
+var panelOpen = false;
+var revealState = 'virgin';
+var distinctTouches = 0;
+var tearStartTime = 0;
+var tearOriginX = 0;
+var tearOriginY = 0;
+var impIdx = 0;
+var lastTouch = { x: 0, y: 0, time: 0, hasLast: false };
+var lastDistinctTouchTime = 0, lastDistinctTouchX = -999, lastDistinctTouchY = -999;
+
+// ============================================================
+//  DIAGNOSTIC LOG
+// ============================================================
 const _log = document.getElementById('log');
 const _logLines = ['init...'];
 function L(m) {
@@ -202,7 +217,8 @@ const LOOPS = {
   mic:       !!localStorage.getItem('blpck.mic')
 };
 const TEAR_DONE = !!localStorage.getItem('blpck.tearDone');
-L('tear='+TEAR_DONE+' loops='+JSON.stringify(LOOPS));
+revealState = TEAR_DONE ? 'revealed' : 'virgin';
+L('tear='+TEAR_DONE+' panelOpen='+panelOpen);
 
 function markComplete(loop) {
   if (!LOOPS[loop]) {
@@ -315,9 +331,6 @@ function resize(){
 resize(); window.addEventListener('resize', resize);
 
 const TEAR_THRESHOLD = 3;
-let distinctTouches = 0;
-let revealState = TEAR_DONE ? 'revealed' : 'virgin';
-let tearStartTime = 0, tearOriginX = 0, tearOriginY = 0;
 const TEAR_DURATION = 1.8;
 
 if (TEAR_DONE) {
@@ -397,7 +410,6 @@ function drawTear(now) {
 }
 
 const ORBIT_RADIUS = 140;
-let panelOpen = false;
 
 const ICON_SVG = {
   paperclip: `<svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M 62 32 L 62 62 C 62 71, 54 76, 47 73 C 40 70, 38 62, 38 56 L 38 36 C 38 31, 42 28, 46 28 C 50 28, 54 31, 54 36 L 54 60 C 54 63, 52 65, 49 65 C 46 65, 44 63, 44 60 L 44 40" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
@@ -459,12 +471,10 @@ function openPanel() {
   panelOpen = true;
   markComplete('plus');
   plusContainer.classList.add('panelOpen');
-  const hasClass = plusContainer.classList.contains('panelOpen');
-  L('class added, hasClass='+hasClass);
   placeOrbits();
 }
 function closePanel() {
-  L('closePanel called');
+  L('closePanel called, panelOpen='+panelOpen);
   if (!panelOpen) return;
   panelOpen = false;
   plusContainer.classList.remove('panelOpen');
@@ -472,16 +482,10 @@ function closePanel() {
 }
 
 plusBtn.addEventListener('click', (e) => {
-  L('PLUS click target='+e.target.tagName);
+  L('PLUS click panelOpen='+panelOpen);
   e.stopPropagation();
   if (panelOpen) closePanel(); else openPanel();
 });
-plusBtn.addEventListener('touchstart', (e) => {
-  L('PLUS touchstart');
-}, { passive: true });
-plusBtn.addEventListener('touchend', (e) => {
-  L('PLUS touchend');
-}, { passive: true });
 
 orbits.paperclip.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -612,9 +616,7 @@ function renderTextFragments(now) {
 }
 
 const chaosEvents = [];
-let impIdx = 0;
 const start = performance.now();
-let lastTouch = { x: 0, y: 0, time: 0, hasLast: false };
 
 function recordImpression(x, y) {
   const now = (performance.now() - start) / 1000;
@@ -654,7 +656,6 @@ function fireChaos(x, y, velocity) {
   if (chaosEvents.length > 20) chaosEvents.splice(0, chaosEvents.length - 20);
 }
 
-let lastDistinctTouchTime = 0, lastDistinctTouchX = -999, lastDistinctTouchY = -999;
 function isDistinctTouch(x, y, now) {
   const dt = now - lastDistinctTouchTime;
   const dist = Math.sqrt((x - lastDistinctTouchX)**2 + (y - lastDistinctTouchY)**2);
@@ -704,9 +705,7 @@ stage.addEventListener('touchstart', e => {
     fireReset();
     return;
   }
-  const isInteractive = isInteractiveTarget(e.target);
-  L('STAGE touchstart target='+e.target.tagName+' interactive='+!!isInteractive);
-  if (isInteractive) return;
+  if (isInteractiveTarget(e.target)) return;
   if (panelOpen) {
     e.preventDefault();
     closePanel();
