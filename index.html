@@ -20,6 +20,15 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 #text { z-index: 3; mix-blend-mode: screen; }
 #tearCanvas { z-index: 4; }
 
+#log {
+  position: fixed; top: 60px; left: 8px; right: 8px;
+  color: #0f0; font-family: monospace; font-size: 10px;
+  z-index: 9998; background: rgba(0,0,0,0.85); padding: 6px;
+  max-height: 200px; overflow: hidden;
+  border: 1px solid #0f0; pointer-events: none;
+  white-space: pre-wrap; line-height: 1.3;
+}
+
 #plusContainer {
   position: absolute;
   top: 50%; left: 50%;
@@ -172,8 +181,20 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
   <input id="fileInput" type="file" accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.txt">
 </div>
 <div id="resetFlash"></div>
+<div id="log">init...</div>
 
 <script>
+// =============== DIAGNOSTIC LOG ===============
+const _log = document.getElementById('log');
+const _logLines = ['init...'];
+function L(m) {
+  const t = new Date().toTimeString().slice(3,8);
+  _logLines.unshift(t + ' ' + m);
+  if (_logLines.length > 14) _logLines.pop();
+  _log.innerText = _logLines.join('\n');
+}
+window.addEventListener('error', e => L('ERR ' + e.message));
+
 const LOOPS = {
   plus:      !!localStorage.getItem('blpck.plus'),
   paperclip: !!localStorage.getItem('blpck.paperclip'),
@@ -181,6 +202,8 @@ const LOOPS = {
   mic:       !!localStorage.getItem('blpck.mic')
 };
 const TEAR_DONE = !!localStorage.getItem('blpck.tearDone');
+L('tear='+TEAR_DONE+' loops='+JSON.stringify(LOOPS));
+
 function markComplete(loop) {
   if (!LOOPS[loop]) {
     LOOPS[loop] = true;
@@ -411,6 +434,7 @@ Object.values(orbits).forEach(o => plusContainer.appendChild(o));
 function placeOrbits() {
   const baseIcons = ['paperclip', 'text', 'mic'];
   const icons = allLoopsComplete() ? [...baseIcons, 'observe', 'offer'] : baseIcons;
+  L('placeOrbits panel='+panelOpen+' n='+icons.length);
   Object.entries(orbits).forEach(([k, el]) => {
     el.style.display = icons.includes(k) ? '' : 'none';
   });
@@ -430,27 +454,17 @@ function placeOrbits() {
 }
 
 function openPanel() {
+  L('openPanel called, panelOpen='+panelOpen);
   if (panelOpen) return;
   panelOpen = true;
   markComplete('plus');
-  // Force every orbit to center with NO transition
-  Object.values(orbits).forEach(el => {
-    if (el.style.display === 'none') return;
-    el.style.transition = 'none';
-    el.style.transform = 'translate(0, 0)';
-  });
-  // Force a synchronous reflow so the browser commits these styles
-  void plusContainer.offsetHeight;
-  // Now add the open class and re-enable transitions before placing
   plusContainer.classList.add('panelOpen');
-  requestAnimationFrame(() => {
-    Object.values(orbits).forEach(el => {
-      el.style.transition = '';
-    });
-    placeOrbits();
-  });
+  const hasClass = plusContainer.classList.contains('panelOpen');
+  L('class added, hasClass='+hasClass);
+  placeOrbits();
 }
 function closePanel() {
+  L('closePanel called');
   if (!panelOpen) return;
   panelOpen = false;
   plusContainer.classList.remove('panelOpen');
@@ -458,9 +472,16 @@ function closePanel() {
 }
 
 plusBtn.addEventListener('click', (e) => {
+  L('PLUS click target='+e.target.tagName);
   e.stopPropagation();
   if (panelOpen) closePanel(); else openPanel();
 });
+plusBtn.addEventListener('touchstart', (e) => {
+  L('PLUS touchstart');
+}, { passive: true });
+plusBtn.addEventListener('touchend', (e) => {
+  L('PLUS touchend');
+}, { passive: true });
 
 orbits.paperclip.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -683,7 +704,9 @@ stage.addEventListener('touchstart', e => {
     fireReset();
     return;
   }
-  if (isInteractiveTarget(e.target)) return;
+  const isInteractive = isInteractiveTarget(e.target);
+  L('STAGE touchstart target='+e.target.tagName+' interactive='+!!isInteractive);
+  if (isInteractive) return;
   if (panelOpen) {
     e.preventDefault();
     closePanel();
