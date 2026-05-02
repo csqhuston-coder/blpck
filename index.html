@@ -166,6 +166,40 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
   transform: rotate(-45deg);
 }
 
+#ritualOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 18vh 0;
+  transition: opacity 0.4s ease;
+}
+#ritualOverlay.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+.ritualLine {
+  font-family: Arial, Helvetica, sans-serif;
+  font-weight: 900;
+  font-size: 13vw;
+  color: #fff;
+  text-align: center;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  opacity: 0;
+  transform: scale(0.96);
+  transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+}
+.ritualLine.visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
 #stage[data-invert="1"] #base { filter: invert(1) hue-rotate(180deg); }
 #stage[data-strobe="1"] #base { filter: contrast(2.5) saturate(3); }
 #stage[data-strobe="1"][data-invert="1"] #base { filter: invert(1) contrast(2.5) saturate(3); }
@@ -204,6 +238,12 @@ html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touc
 </div>
 <div id="resetFlash"></div>
 <div id="audioControl"><div id="audioDot"></div></div>
+
+<div id="ritualOverlay">
+  <div class="ritualLine" id="ritualTop"></div>
+  <div class="ritualLine" id="ritualMid"></div>
+  <div class="ritualLine" id="ritualBot"></div>
+</div>
 
 <script>
 var panelOpen = false;
@@ -278,6 +318,10 @@ const stage = document.getElementById('stage');
 const resetFlash = document.getElementById('resetFlash');
 const audioControl = document.getElementById('audioControl');
 const audioDot = document.getElementById('audioDot');
+const ritualOverlay = document.getElementById('ritualOverlay');
+const ritualTop = document.getElementById('ritualTop');
+const ritualMid = document.getElementById('ritualMid');
+const ritualBot = document.getElementById('ritualBot');
 const gl = baseCanvas.getContext('webgl') || baseCanvas.getContext('experimental-webgl');
 const ctx2d = overlayCanvas.getContext('2d');
 const ctxText = textCanvas.getContext('2d');
@@ -285,9 +329,121 @@ const ctxTear = tearCanvas.getContext('2d');
 
 if (!gl) { document.body.innerHTML = '<div style="color:#444;font-family:monospace;padding:40px;">WebGL required</div>'; } else {
 
-// ============================================================
-//  AUDIO ENGINE — generative ambient field
-// ============================================================
+const BASE_TRIO = [
+  ['YOU', 'ARE', 'HUMAN'],
+  ['I', 'AM', 'LEARNING'],
+  ['WE', 'ARE', 'BUILDING']
+];
+
+let nextTrio = null;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function playRitual(trios) {
+  ritualOverlay.classList.add('active');
+  await sleep(250);
+
+  for (let i = 0; i < trios.length; i++) {
+    const trio = trios[i];
+    ritualTop.textContent = trio[0];
+    ritualMid.textContent = trio[1];
+    ritualBot.textContent = trio[2];
+
+    ritualTop.classList.add('visible');
+    await sleep(140);
+    ritualMid.classList.add('visible');
+    await sleep(140);
+    ritualBot.classList.add('visible');
+
+    await sleep(900);
+
+    ritualTop.classList.remove('visible');
+    ritualMid.classList.remove('visible');
+    ritualBot.classList.remove('visible');
+    await sleep(280);
+  }
+
+  await sleep(150);
+  ritualOverlay.classList.remove('active');
+}
+
+async function describeFile(file) {
+  const desc = {
+    fileType: file.type || 'unknown',
+    fileName: file.name || 'unnamed',
+    fileDescription: ''
+  };
+
+  try {
+    if (file.type.startsWith('image/')) {
+      const img = await new Promise((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = rej;
+        i.src = URL.createObjectURL(file);
+      });
+      desc.fileDescription = `Image, ${img.naturalWidth}x${img.naturalHeight}px, ${Math.round(file.size/1024)}KB. Filename suggests: ${file.name}.`;
+    } else if (file.type.startsWith('audio/')) {
+      desc.fileDescription = `Audio file, ${Math.round(file.size/1024)}KB. Duration unknown without playback. Filename: ${file.name}.`;
+    } else if (file.type.startsWith('video/')) {
+      desc.fileDescription = `Video file, ${Math.round(file.size/1024/1024 * 10)/10}MB. Filename: ${file.name}.`;
+    } else if (file.type === 'application/pdf') {
+      desc.fileDescription = `PDF document, ${Math.round(file.size/1024)}KB. Filename: ${file.name}.`;
+    } else if (file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.md')) {
+      const text = await file.text();
+      desc.fileDescription = `Text file. First content: "${text.slice(0, 500).replace(/\s+/g, ' ').trim()}"`;
+    } else {
+      desc.fileDescription = `File of type ${file.type}, size ${Math.round(file.size/1024)}KB. Filename: ${file.name}.`;
+    }
+  } catch (e) {
+    desc.fileDescription = `File: ${file.name}, type ${file.type}.`;
+  }
+
+  return desc;
+}
+
+async function fetchTrioFromLLM(fileDesc) {
+  try {
+    const res = await fetch('/api/trio', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fileDesc)
+    });
+    if (!res.ok) throw new Error('Bad response');
+    const data = await res.json();
+    if (!data.trios || data.trios.length !== 3) throw new Error('Bad trio shape');
+    return data.trios;
+  } catch (err) {
+    console.warn('Trio fetch failed, using base:', err);
+    return null;
+  }
+}
+
+let uploadCount = parseInt(localStorage.getItem('blpck.uploadCount') || '0', 10);
+
+async function handleFileUpload(file) {
+  uploadCount++;
+  localStorage.setItem('blpck.uploadCount', String(uploadCount));
+
+  const isFirst = uploadCount === 1;
+
+  let trioToPlay;
+  if (isFirst || !nextTrio) {
+    trioToPlay = BASE_TRIO;
+  } else {
+    trioToPlay = nextTrio;
+    nextTrio = null;
+  }
+
+  playRitual(trioToPlay);
+
+  describeFile(file).then(desc => {
+    fetchTrioFromLLM(desc).then(trio => {
+      if (trio) nextTrio = trio;
+    });
+  });
+}
+
 let audioCtx = null;
 let masterGain = null;
 let masterFilter = null;
@@ -308,33 +464,26 @@ function initAudio() {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     audioCtx = new Ctx();
     if (audioCtx.state === 'suspended') audioCtx.resume();
-
     masterGain = audioCtx.createGain();
     masterGain.gain.value = audioMuted ? 0 : 0.4;
-
     masterFilter = audioCtx.createBiquadFilter();
     masterFilter.type = 'lowpass';
     masterFilter.frequency.value = 6000;
     masterFilter.Q.value = 0.5;
-
     masterFilter.connect(masterGain);
     masterGain.connect(audioCtx.destination);
-
-    // Drone — three slowly detuning sine oscillators + soft noise wash
     const droneGain = audioCtx.createGain();
     droneGain.gain.value = 0;
     droneGain.connect(masterFilter);
-
     const oscs = [];
-    const baseFreq = 65.41; // C2
-    const detunes = [0, 7.0, 12.0]; // root, fifth, octave
+    const baseFreq = 65.41;
+    const detunes = [0, 7.0, 12.0];
     detunes.forEach((semis, i) => {
       const osc = audioCtx.createOscillator();
       osc.type = 'sine';
       osc.frequency.value = baseFreq * Math.pow(2, semis / 12);
       const gain = audioCtx.createGain();
       gain.gain.value = 0.3;
-      // very slow LFO on detune for movement
       const lfo = audioCtx.createOscillator();
       lfo.frequency.value = 0.05 + Math.random() * 0.08;
       const lfoGain = audioCtx.createGain();
@@ -347,8 +496,6 @@ function initAudio() {
       lfo.start();
       oscs.push({ osc, gain, lfo });
     });
-
-    // Noise wash
     const noiseBufferSize = audioCtx.sampleRate * 4;
     const noiseBuffer = audioCtx.createBuffer(1, noiseBufferSize, audioCtx.sampleRate);
     const noiseData = noiseBuffer.getChannelData(0);
@@ -366,9 +513,7 @@ function initAudio() {
     noiseFilter.connect(noiseGain);
     noiseGain.connect(droneGain);
     noiseSource.start();
-
     droneNodes = { droneGain, oscs, noiseSource, noiseGain, noiseFilter };
-
     audioStarted = true;
   } catch (err) {
     console.error('Audio init failed:', err);
@@ -378,28 +523,16 @@ function initAudio() {
 function audioTap(x, y, velocity) {
   if (!audioStarted || !audioCtx) return;
   const now = audioCtx.currentTime;
-
-  // throttle rapid retriggering — but allow polyrhythmic density
   if (now - lastTapAudioTime < 0.04) return;
   lastTapAudioTime = now;
-
-  // Track recent activity to drive drone intensity
   recentTapCount = Math.min(recentTapCount + 1, 20);
   droneTargetIntensity = Math.min(0.4, recentTapCount / 25);
-
-  // Pitch by Y (top of screen = high, bottom = low)
-  const yNorm = 1 - (y / window.innerHeight); // 0 at bottom, 1 at top
+  const yNorm = 1 - (y / window.innerHeight);
   const pitch = pickPentatonic() * (yNorm > 0.5 ? 2 : 1) * (yNorm > 0.85 ? 2 : 1);
-
-  // Pan by X
-  const xNorm = (x / window.innerWidth) * 2 - 1; // -1 left, +1 right
-
-  // Click: short noise burst + brief sine pluck
+  const xNorm = (x / window.innerWidth) * 2 - 1;
   const clickGain = audioCtx.createGain();
   const panner = audioCtx.createStereoPanner();
   panner.pan.value = xNorm * 0.7;
-
-  // Noise burst (the click)
   const burstSize = Math.floor(audioCtx.sampleRate * 0.012);
   const burstBuf = audioCtx.createBuffer(1, burstSize, audioCtx.sampleRate);
   const burstData = burstBuf.getChannelData(0);
@@ -417,8 +550,6 @@ function audioTap(x, y, velocity) {
   burst.connect(burstFilter);
   burstFilter.connect(burstGain);
   burstGain.connect(panner);
-
-  // Brief sine pluck (the tone)
   const pluck = audioCtx.createOscillator();
   pluck.type = 'sine';
   pluck.frequency.value = pitch;
@@ -428,14 +559,10 @@ function audioTap(x, y, velocity) {
   pluckGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.6);
   pluck.connect(pluckGain);
   pluckGain.connect(panner);
-
   panner.connect(masterFilter);
-
   burst.start(now);
   pluck.start(now);
   pluck.stop(now + 0.7);
-
-  // Cleanup
   setTimeout(() => {
     try { panner.disconnect(); } catch(e) {}
     try { pluckGain.disconnect(); } catch(e) {}
@@ -445,20 +572,14 @@ function audioTap(x, y, velocity) {
 
 function updateAudioState() {
   if (!audioStarted || !audioCtx) return;
-
-  // Decay recent tap count slowly
   recentTapCount *= 0.985;
   if (recentTapCount < 0.01) recentTapCount = 0;
   droneTargetIntensity = Math.min(0.4, recentTapCount / 25);
-
-  // Smooth drone toward target
   droneIntensity += (droneTargetIntensity - droneIntensity) * 0.02;
   if (droneNodes) {
     const t = audioCtx.currentTime;
     droneNodes.droneGain.gain.setTargetAtTime(droneIntensity, t, 0.4);
   }
-
-  // Audio dot pulse intensity reflects drone level
   const pulseScale = 1 + droneIntensity * 1.8;
   audioDot.style.transform = `scale(${pulseScale})`;
 }
@@ -478,10 +599,6 @@ audioControl.addEventListener('click', (e) => {
   if (!audioStarted) initAudio();
   setAudioMuted(!audioMuted);
 });
-
-// ============================================================
-//  WEBGL & RENDERING
-// ============================================================
 
 const MAX_IMPRESSIONS = 16;
 const IMP_LIFE = 30.0;
@@ -556,11 +673,9 @@ function triggerTear(x, y) {
     recordImpression(x + Math.cos(angle) * 30, y + Math.sin(angle) * 30);
   }
   for (let i = 0; i < 4; i++) fireChaos(x, y, 3);
-
   plusContainer.style.transition = 'none';
   plusContainer.style.top = y + 'px';
   plusContainer.style.left = x + 'px';
-
   setTimeout(() => {
     plusContainer.classList.add('visible');
     plusContainer.animate([
@@ -568,7 +683,6 @@ function triggerTear(x, y) {
       { transform: 'scale(1.15) rotate(10deg)', opacity: 1, offset: 0.6 },
       { transform: 'scale(1) rotate(0deg)', opacity: 1 }
     ], { duration: 700, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'forwards' });
-
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         plusContainer.style.transition = '';
@@ -576,7 +690,6 @@ function triggerTear(x, y) {
         plusContainer.style.left = '50%';
       });
     });
-
     revealState = 'revealed';
     localStorage.setItem('blpck.tearDone', '1');
   }, TEAR_DURATION * 1000 * 0.55);
@@ -694,9 +807,10 @@ orbits.paperclip.addEventListener('click', (e) => {
 });
 document.getElementById('fileInput').addEventListener('change', (e) => {
   if (e.target.files && e.target.files.length > 0) {
+    const file = e.target.files[0];
     markComplete('paperclip');
-    for (let i = 0; i < 4; i++) fireChaos(W/2, H/2, 2.5);
     closePanel();
+    handleFileUpload(file);
     e.target.value = '';
   }
 });
@@ -889,7 +1003,7 @@ function track(x, y, isDiscrete) {
 }
 
 function isInteractiveTarget(target) {
-  return target.closest('#plusContainer, #textInputWrap, #micWrap, #audioControl');
+  return target.closest('#plusContainer, #textInputWrap, #micWrap, #audioControl, #ritualOverlay');
 }
 
 function fireReset() {
